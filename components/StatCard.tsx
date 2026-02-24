@@ -12,11 +12,11 @@ interface StatCardProps {
 
 export const StatCard: React.FC<StatCardProps> = ({ label, value, unit, trend, icon, color = 'blue' }) => {
   const colorMap: Record<string, string> = {
-    blue: 'border-blue-500/30 text-blue-400',
-    green: 'border-emerald-500/30 text-emerald-400',
-    purple: 'border-purple-500/30 text-purple-400',
-    rose: 'border-rose-500/30 text-rose-400',
-    amber: 'border-amber-500/30 text-amber-400',
+    blue: 'border-blue-100 text-blue-600',
+    green: 'border-emerald-100 text-emerald-600',
+    purple: 'border-purple-100 text-purple-600',
+    rose: 'border-rose-100 text-rose-600',
+    amber: 'border-amber-100 text-amber-600',
   };
 
   const glowMap: Record<string, string> = {
@@ -28,19 +28,19 @@ export const StatCard: React.FC<StatCardProps> = ({ label, value, unit, trend, i
   };
 
   return (
-    <div className={`p-5 rounded-xl border bg-[#1e293b] ${colorMap[color]} shadow-xl ${glowMap[color]} flex flex-col justify-between transition-all hover:bg-[#243147] hover:border-opacity-100 group`}>
+    <div className={`p-5 rounded-xl border bg-white ${colorMap[color]} shadow-sm ${glowMap[color]} flex flex-col justify-between transition-all hover:bg-slate-50 hover:border-opacity-100 group`}>
       <div className="flex justify-between items-start mb-3">
-        <p className="text-[10px] font-black uppercase tracking-[0.15em] opacity-60 group-hover:opacity-100 transition-opacity">{label}</p>
-        <div className="opacity-40 group-hover:opacity-100 transition-opacity">
+        <p className="text-[10px] font-black uppercase tracking-[0.15em] text-slate-500 group-hover:text-slate-900 transition-colors">{label}</p>
+        <div className="text-slate-400 group-hover:text-inherit transition-colors">
           {icon}
         </div>
       </div>
       <div className="flex items-baseline gap-1.5">
-        <span className="text-3xl font-black tracking-tighter text-white">{value}</span>
-        <span className="text-[10px] font-bold uppercase opacity-40">{unit}</span>
+        <span className="text-3xl font-black tracking-tighter text-slate-900">{value}</span>
+        <span className="text-[10px] font-bold uppercase text-slate-400">{unit}</span>
       </div>
       {trend && (
-        <p className="text-[9px] font-black uppercase tracking-widest mt-2 opacity-30 group-hover:opacity-60 transition-opacity border-t border-slate-800 pt-2">
+        <p className="text-[9px] font-black uppercase tracking-widest mt-2 text-slate-400 group-hover:text-slate-600 transition-colors border-t border-slate-100 pt-2">
           {trend}
         </p>
       )}

@@ -7,7 +7,7 @@ import {
 import { 
   Activity, Moon, Scale, Zap, TrendingDown, MessageSquare, Sparkles,
   Heart, Upload, FileText, RefreshCw, Dumbbell, Bike, Plus, Pill, Calendar, Clock, Filter, 
-  Target, BarChart3, Info
+  Target, BarChart3, Info, Waves, Mountain
 } from 'lucide-react';
 import { DaySummary } from './types';
 import { parseTrainingPeaksCSV } from './services/dataParser';
@@ -78,6 +78,8 @@ export default function App() {
     const avgHrv = hrvEntries.length > 0 
       ? hrvEntries.reduce((acc, d) => acc + (d.hrv || 0), 0) / hrvEntries.length 
       : 0;
+    const minHrv = hrvEntries.length > 0 ? Math.min(...hrvEntries.map(d => d.hrv || Infinity)) : 0;
+    const maxHrv = hrvEntries.length > 0 ? Math.max(...hrvEntries.map(d => d.hrv || -Infinity)) : 0;
 
     const sleepEntries = filteredData.filter(d => d.sleepHours && d.sleepHours > 0);
     const avgSleep = sleepEntries.length > 0
@@ -85,17 +87,31 @@ export default function App() {
       : 0;
       
     const totalTss = filteredData.reduce((acc, d) => acc + (d.tss || 0), 0);
+    const last7Days = filteredData.slice(-7);
+    const lastWeekTss = last7Days.reduce((acc, d) => acc + (d.tss || 0), 0);
+    
     const strengthCount = filteredData.filter(d => d.isStrengthDay).length;
     const totalSpanDays = data.length;
+
+    const totalWeightLoss = latestWeight > 0 ? firstWeight - latestWeight : 0;
+    const weightLossPercent = firstWeight > 0 ? (totalWeightLoss / firstWeight * 100).toFixed(1) : "0.0";
+    const avgWeeklyLoss = (totalWeightLoss / Math.max(1, totalSpanDays / 7)).toFixed(2);
+    const avgWeeklyStrength = (strengthCount / Math.max(1, totalSpanDays / 7)).toFixed(2);
     
     return {
       currentWeight: latestWeight > 0 ? latestWeight.toFixed(1) : "—",
-      weightLoss: latestWeight > 0 ? (firstWeight - latestWeight).toFixed(1) : "0.0",
+      weightLoss: totalWeightLoss.toFixed(1),
+      weightLossPercent,
+      avgWeeklyLoss,
       avgHRV: avgHrv.toFixed(0),
+      minHrv: minHrv.toFixed(0),
+      maxHrv: maxHrv.toFixed(0),
       avgSleep: avgSleep.toFixed(1),
       totalTss: totalTss.toFixed(0),
       strengthSessions: strengthCount,
+      avgWeeklyStrength,
       avgWeeklyTss: (totalTss / Math.max(1, totalSpanDays / 7)).toFixed(0),
+      lastWeekTss: lastWeekTss.toFixed(0),
       dataPoints: filteredData.length
     };
   }, [filteredData, data.length]);
@@ -165,6 +181,46 @@ export default function App() {
     return segments;
   }, [filteredData]);
 
+  /**
+   * Linear interpolation for a specific key in a dataset.
+   * Fills null values by calculating values based on nearest known neighbors.
+   */
+  const interpolateData = (dataset: any[], key: string) => {
+    const result = [...dataset];
+    for (let i = 0; i < result.length; i++) {
+      if (result[i][key] === null) {
+        // Find previous non-null
+        let prevIdx = -1;
+        for (let j = i - 1; j >= 0; j--) {
+          if (result[j][key] !== null) {
+            prevIdx = j;
+            break;
+          }
+        }
+        // Find next non-null
+        let nextIdx = -1;
+        for (let j = i + 1; j < result.length; j++) {
+          if (result[j][key] !== null) {
+            nextIdx = j;
+            break;
+          }
+        }
+
+        if (prevIdx !== -1 && nextIdx !== -1) {
+          const prevVal = result[prevIdx][key];
+          const nextVal = result[nextIdx][key];
+          const factor = (i - prevIdx) / (nextIdx - prevIdx);
+          result[i][key] = parseFloat((prevVal + (nextVal - prevVal) * factor).toFixed(2));
+        } else if (prevIdx !== -1) {
+          result[i][key] = result[prevIdx][key];
+        } else if (nextIdx !== -1) {
+          result[i][key] = result[nextIdx][key];
+        }
+      }
+    }
+    return result;
+  };
+
   const processedChartData = useMemo(() => {
     if (filteredData.length === 0) return [];
     const getWeekId = (dateStr: string) => {
@@ -176,37 +232,39 @@ export default function App() {
     };
 
     if (chartViewMode === 'weekly') {
-      const weeks: Record<string, { weekId: string, tss: number, weights: number[], hrvs: number[] }> = {};
+      const weeks: Record<string, { weekId: string, tss: number, weights: number[], hrvs: number[], pulses: number[] }> = {};
       filteredData.forEach(d => {
         const weekId = getWeekId(d.date);
-        if (!weeks[weekId]) weeks[weekId] = { weekId, tss: 0, weights: [], hrvs: [] };
+        if (!weeks[weekId]) weeks[weekId] = { weekId, tss: 0, weights: [], hrvs: [], pulses: [] };
         weeks[weekId].tss += (d.tss || 0);
         if (d.weight && d.weight > 0) weeks[weekId].weights.push(d.weight);
         if (d.hrv && d.hrv > 0) weeks[weekId].hrvs.push(d.hrv);
+        if (d.pulse && d.pulse > 0) weeks[weekId].pulses.push(d.pulse);
       });
       return Object.values(weeks).map(w => ({
         label: w.weekId,
         tss: Math.round(w.tss),
         weight: w.weights.length > 0 ? parseFloat((w.weights.reduce((a, b) => a + b, 0) / w.weights.length).toFixed(1)) : null,
         hrv: w.hrvs.length > 0 ? Math.round(w.hrvs.reduce((a, b) => a + b, 0) / w.hrvs.length) : null,
+        pulse: w.pulses.length > 0 ? Math.round(w.pulses.reduce((a, b) => a + b, 0) / w.pulses.length) : null,
       }));
     } else {
-      const weeklyTotals: Record<string, number> = {};
-      filteredData.forEach(d => {
-        const weekId = getWeekId(d.date);
-        weeklyTotals[weekId] = (weeklyTotals[weekId] || 0) + (d.tss || 0);
-      });
-      return filteredData.map(d => {
-        const dateObj = new Date(d.date);
-        const weekId = getWeekId(d.date);
-        const isMidWeek = dateObj.getDay() === 3; 
+      let rawDaily = filteredData.map(d => {
         return {
           label: d.date,
           weight: d.weight || null,
           hrv: d.hrv || null,
-          tss: isMidWeek ? Math.round(weeklyTotals[weekId]) : null,
+          pulse: d.pulse || null,
+          tss: d.tss ? Math.round(d.tss) : null,
         };
       });
+
+      // Apply interpolation for smoother trends in daily precision mode
+      rawDaily = interpolateData(rawDaily, 'weight');
+      rawDaily = interpolateData(rawDaily, 'hrv');
+      rawDaily = interpolateData(rawDaily, 'pulse');
+      
+      return rawDaily;
     }
   }, [filteredData, chartViewMode]);
 
@@ -250,17 +308,17 @@ export default function App() {
 
   if (data.length === 0) {
     return (
-      <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-6 text-white"
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 text-slate-900"
            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
            onDragLeave={() => setIsDragging(false)}
            onDrop={onDrop}>
-        <div className={`max-w-2xl w-full bg-[#1e293b] p-12 rounded-3xl shadow-2xl border transition-all ${isDragging ? 'border-cyan-500 bg-[#1e293b]/80 scale-105' : 'border-slate-800'}`}>
+        <div className={`max-w-2xl w-full bg-white p-12 rounded-3xl shadow-xl border transition-all ${isDragging ? 'border-cyan-500 bg-slate-50 scale-105' : 'border-slate-200'}`}>
           <div className="text-center">
             <div className="bg-gradient-to-br from-cyan-600 to-blue-700 w-24 h-24 rounded-3xl flex items-center justify-center text-white mx-auto mb-8 shadow-xl">
               <Upload size={48} />
             </div>
-            <h1 className="text-4xl font-black mb-3 tracking-tighter uppercase">PhysioInsight <span className="text-cyan-400">Elite</span></h1>
-            <p className="text-slate-400 text-lg mb-10 max-w-md mx-auto font-medium">Precision physiological analysis for elite performance.</p>
+            <h1 className="text-4xl font-black mb-3 tracking-tighter uppercase">PhysioInsight <span className="text-cyan-600">Elite</span></h1>
+            <p className="text-slate-500 text-lg mb-10 max-w-md mx-auto font-medium">Precision physiological analysis for elite performance.</p>
             <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" multiple className="hidden" />
             <button onClick={() => fileInputRef.current?.click()} className="bg-cyan-600 hover:bg-cyan-500 text-white font-black py-5 px-12 rounded-xl transition-all shadow-lg active:scale-95 flex items-center gap-4 mx-auto uppercase tracking-wider text-sm">
               <FileText size={20} />
@@ -273,23 +331,23 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen pb-40 bg-[#0f172a] text-slate-100 font-sans">
-      <header className="sticky top-0 z-50 bg-[#0f172a]/90 backdrop-blur-xl border-b border-slate-800 px-10 py-4 flex items-center justify-between">
+    <div className="min-h-screen pb-40 bg-slate-50 text-slate-900 font-sans">
+      <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b border-slate-200 px-10 py-4 flex items-center justify-between">
         <div className="flex items-center gap-5">
           <div className="bg-cyan-600 p-2.5 rounded-xl text-white shadow-lg">
             <Activity size={22} />
           </div>
           <div>
-            <h1 className="text-lg font-black tracking-tighter uppercase leading-none">PhysioInsight <span className="text-cyan-400">Elite</span></h1>
+            <h1 className="text-lg font-black tracking-tighter uppercase leading-none">PhysioInsight <span className="text-cyan-600">Elite</span></h1>
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-black uppercase tracking-widest border border-slate-700 transition-all">
+          <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-black uppercase tracking-widest border border-slate-200 transition-all shadow-sm">
             <Plus size={14} />
             Add Datasets
           </button>
           <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" multiple className="hidden" />
-          <button onClick={() => setData([])} className="p-2.5 hover:bg-red-900/30 hover:text-red-400 rounded-lg text-slate-500 transition-all">
+          <button onClick={() => setData([])} className="p-2.5 hover:bg-red-50 hover:text-red-600 rounded-lg text-slate-400 transition-all">
             <RefreshCw size={18} />
           </button>
         </div>
@@ -297,26 +355,29 @@ export default function App() {
 
       <main className="max-w-[1600px] mx-auto px-10 pt-10 space-y-8">
         {/* Performance Filters */}
-        <section className="bg-[#1e293b] p-4 rounded-xl border border-slate-800 shadow-xl flex items-center justify-between">
+        <section className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
            <div className="flex items-center gap-4 overflow-x-auto no-scrollbar scroll-smooth">
-             <div className="flex items-center gap-2 text-slate-500 mr-2 shrink-0">
+             <div className="flex items-center gap-2 text-slate-400 mr-2 shrink-0">
                <Filter size={16} />
                <span className="text-[10px] font-black uppercase tracking-widest">Training Modality</span>
              </div>
              {workoutTypes.map(type => {
                const isActive = selectedWorkoutType === type;
+               // Map MTB to GRV and BIKE to RD/ZW for button display
+               const displayLabel = type.toUpperCase() === 'MTB' ? 'GRV' : type.toUpperCase() === 'BIKE' ? 'RD/ZW' : type;
                return (
                  <button
                    key={type}
                    onClick={() => setSelectedWorkoutType(type)}
                    className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shrink-0 flex items-center gap-2 border ${
-                     isActive ? 'bg-cyan-600 border-cyan-500 text-white shadow-lg' : 'bg-slate-900 border-slate-700 text-slate-500 hover:text-slate-300'
+                     isActive ? 'bg-cyan-600 border-cyan-500 text-white shadow-md' : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-100'
                    }`}
                  >
                    {type === 'All' && <Activity size={14} />}
-                   {type.toLowerCase().includes('bike') && <Bike size={14} />}
+                   {type.toUpperCase() === 'MTB' && <Bike size={14} className="-rotate-12" />}
+                   {type.toUpperCase() === 'BIKE' && <Bike size={14} />}
                    {type.toLowerCase().includes('strength') && <Dumbbell size={14} />}
-                   {type}
+                   {displayLabel}
                  </button>
                );
              })}
@@ -325,142 +386,205 @@ export default function App() {
 
         {/* Precision Stats */}
         <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-          <StatCard label="Mass Differential" value={stats?.weightLoss || 0} unit="kg" color="rose" icon={<TrendingDown size={18} />} trend={`Current: ${stats?.currentWeight}kg`} />
-          <StatCard label={`${selectedWorkoutType} Load`} value={stats?.avgWeeklyTss || 0} unit="pts" color="amber" icon={<Zap size={18} />} trend={`Total: ${stats?.totalTss}`} />
-          <StatCard label="Resistance" value={stats?.strengthSessions || 0} unit="sesh" color="blue" icon={<Dumbbell size={18} />} trend="Volume Tracker" />
-          <StatCard label="HR Variability" value={stats?.avgHRV || 0} unit="ms" color="green" icon={<Heart size={18} />} trend="Baseline Delta" />
+          <StatCard 
+            label="Mass Differential" 
+            value={stats ? `${stats.weightLoss} kg (${stats.weightLossPercent}%)` : 0} 
+            unit="" 
+            color="rose" 
+            icon={<TrendingDown size={18} />} 
+            trend={`Curr: ${stats?.currentWeight}kg | Avg: ${stats?.avgWeeklyLoss}kg/wk`} 
+          />
+          <StatCard 
+            label={`${selectedWorkoutType} Load`} 
+            value={stats?.lastWeekTss || 0} 
+            unit="TSS" 
+            color="amber" 
+            icon={<Zap size={18} />} 
+            trend={`Weekly Avg: ${stats?.avgWeeklyTss} | Total: ${stats?.totalTss}`} 
+          />
+          <StatCard label="STRENGTH" value={stats?.strengthSessions || 0} unit="sesh" color="blue" icon={<Dumbbell size={18} />} trend={`Avg: ${stats?.avgWeeklyStrength}/wk`} />
+          <StatCard 
+            label="HR Variability" 
+            value={stats?.avgHRV || 0} 
+            unit="ms" 
+            color="green" 
+            icon={<Heart size={18} />} 
+            trend={`Range: ${stats?.minHrv} - ${stats?.maxHrv} ms`} 
+          />
           <StatCard label="Rest duration" value={stats?.avgSleep || 0} unit="hrs" color="purple" icon={<Moon size={18} />} trend="Recovery Window" />
-          <div className="p-4 rounded-xl bg-gradient-to-br from-[#1e293b] to-[#0f172a] border border-slate-800 flex flex-col justify-center">
-             <div className="flex items-center gap-2 text-cyan-400 mb-1">
+          <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col justify-center">
+             <div className="flex items-center gap-2 text-cyan-600 mb-1">
                 <Target size={14} />
                 <span className="text-[10px] font-black uppercase tracking-widest">Cycles</span>
              </div>
-             <p className="text-xl font-black text-white">{doseSegments.length} <span className="text-xs font-medium text-slate-500">Active</span></p>
+             <p className="text-xl font-black text-slate-900">{doseSegments.length} <span className="text-xs font-medium text-slate-400">Active</span></p>
+             <p className="text-[9px] font-black uppercase tracking-widest opacity-30 mt-2 border-t border-slate-100 pt-2 text-slate-500">
+               {Math.floor(data.length / 7)} Weeks Total
+             </p>
           </div>
         </section>
 
-        {/* Primary Analytical Graph */}
-        <div className="bg-[#1e293b] p-8 rounded-2xl border border-slate-800 shadow-2xl relative overflow-hidden">
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-6 relative z-10">
-            <div>
-              <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                <BarChart3 size={20} className="text-cyan-400" />
-                Performance Load & Physiological Response
-              </h3>
-              <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-1">Correlation of training stress (TSS) vs Biometric data.</p>
+        {/* Analytical Graph Block */}
+        <div className="space-y-4">
+          {/* Section 1: Workload & Mass */}
+          <div className="bg-white p-8 pb-4 rounded-t-2xl border border-slate-200 shadow-sm relative overflow-hidden">
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-6 relative z-10">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tighter flex items-center gap-2">
+                  <BarChart3 size={20} className="text-cyan-600" />
+                  Performance Load and Weight Response
+                </h3>
+                <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">Correlation of mechanical work vs somatic mass.</p>
+              </div>
+              <div className="flex bg-slate-50 p-1 rounded-lg border border-slate-200">
+                <button onClick={() => setChartViewMode('daily')} className={`px-4 py-1.5 rounded-md text-[9px] font-black uppercase tracking-widest transition-all ${chartViewMode === 'daily' ? 'bg-cyan-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Daily Precision</button>
+                <button onClick={() => setChartViewMode('weekly')} className={`px-4 py-1.5 rounded-md text-[9px] font-black uppercase tracking-widest transition-all ${chartViewMode === 'weekly' ? 'bg-cyan-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Weekly Aggregate</button>
+              </div>
             </div>
-            <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-700">
-              <button onClick={() => setChartViewMode('daily')} className={`px-4 py-1.5 rounded-md text-[9px] font-black uppercase tracking-widest transition-all ${chartViewMode === 'daily' ? 'bg-cyan-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>Daily Precision</button>
-              <button onClick={() => setChartViewMode('weekly')} className={`px-4 py-1.5 rounded-md text-[9px] font-black uppercase tracking-widest transition-all ${chartViewMode === 'weekly' ? 'bg-cyan-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>Weekly Aggregate</button>
+            <div className="h-[280px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={processedChartData} syncId="performanceSync">
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" opacity={0.5} />
+                  <XAxis dataKey="label" hide />
+                  <YAxis yAxisId="left" domain={['dataMin - 0.5', 'dataMax + 0.5']} orientation="left" stroke="#f43f5e" axisLine={false} tickLine={false} tick={{fontSize: 9, fontWeight: 700}} />
+                  <YAxis yAxisId="right" orientation="right" domain={[0, 'auto']} stroke="#0891b2" axisLine={false} tickLine={false} tick={{fontSize: 9, fontWeight: 700}} />
+                  <Tooltip 
+                    cursor={{ fill: 'rgba(0,0,0,0.02)' }}
+                    contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', padding: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                    itemStyle={{ fontSize: '10px', fontWeight: 'bold' }}
+                    labelStyle={{ fontSize: '11px', fontWeight: 'black', color: '#0f172a', marginBottom: '4px' }}
+                  />
+                  <Legend verticalAlign="top" height={36} iconType="rect" align="right" wrapperStyle={{fontSize: '9px', fontWeight: 'black', textTransform: 'uppercase', letterSpacing: '0.05em'}} />
+                  <Bar yAxisId="right" dataKey="tss" name="Load (TSS)" fill="#0891b2" opacity={0.15} radius={[2, 2, 0, 0]} barSize={chartViewMode === 'daily' ? 100 : undefined} />
+                  <Area yAxisId="left" type="monotone" dataKey="weight" name="Mass (kg)" stroke="#f43f5e" strokeWidth={3} fill="rgba(244,63,94,0.05)" connectNulls={true} dot={chartViewMode === 'weekly' ? { r: 3, fill: '#f43f5e', strokeWidth: 0 } : false} />
+                </ComposedChart>
+              </ResponsiveContainer>
             </div>
           </div>
-          <div className="h-[450px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={processedChartData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" opacity={0.3} />
-                <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 9, fontWeight: 800, fill: '#64748b' }} height={40} interval={chartViewMode === 'daily' ? 6 : 0} />
-                <YAxis yAxisId="left" domain={['dataMin - 0.5', 'dataMax + 0.5']} orientation="left" stroke="#f43f5e" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 700}} />
-                <YAxis yAxisId="right" orientation="right" domain={[0, 'auto']} stroke="#06b6d4" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 700}} />
-                <Tooltip 
-                  cursor={{ fill: 'rgba(255,255,255,0.03)' }}
-                  contentStyle={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', boxShadow: '0 20px 40px rgba(0,0,0,0.5)', padding: '12px' }}
-                  itemStyle={{ fontSize: '11px', fontWeight: 'bold' }}
-                  labelStyle={{ fontSize: '12px', fontWeight: 'black', color: '#fff', marginBottom: '8px' }}
-                />
-                <Legend verticalAlign="top" height={36} iconType="rect" align="right" wrapperStyle={{fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em'}} />
-                <Bar yAxisId="right" dataKey="tss" name="Training Load (TSS)" fill="#06b6d4" opacity={0.2} radius={[2, 2, 0, 0]} barSize={chartViewMode === 'daily' ? 100 : undefined} />
-                <Area yAxisId="left" type="monotone" dataKey="weight" name="Mass (kg)" stroke="#f43f5e" strokeWidth={3} fill="rgba(244,63,94,0.05)" dot={chartViewMode === 'weekly' ? { r: 3, fill: '#f43f5e', strokeWidth: 0 } : false} />
-                <Line yAxisId="right" type="stepAfter" dataKey="hrv" name="Recovery (HRV)" stroke="#10b981" strokeWidth={2} dot={chartViewMode === 'weekly' ? { r: 3, fill: '#10b981', strokeWidth: 0 } : false} />
-              </ComposedChart>
-            </ResponsiveContainer>
+
+          {/* Section 2: Cardiovascular Recovery */}
+          <div className="bg-white p-8 pt-4 rounded-b-2xl border border-slate-200 shadow-sm relative overflow-hidden">
+            <div className="mb-6">
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-tighter flex items-center gap-2">
+                <Waves size={16} className="text-rose-500" />
+                Cardiovascular Response
+              </h3>
+              <p className="text-slate-400 text-[9px] font-bold uppercase tracking-widest mt-1">Autonomous nervous system (HRV) and Basal Heart Rate (RHR).</p>
+            </div>
+            <div className="h-[220px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={processedChartData} syncId="performanceSync">
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" opacity={0.5} />
+                  <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 9, fontWeight: 800, fill: '#64748b' }} height={30} interval={chartViewMode === 'daily' ? 6 : 0} />
+                  <YAxis yAxisId="left" domain={['dataMin - 10', 'dataMax + 10']} orientation="left" stroke="#f43f5e" axisLine={false} tickLine={false} tick={{fontSize: 9, fontWeight: 700}} />
+                  <YAxis yAxisId="right" orientation="right" domain={[50, 70]} stroke="#94a3b8" axisLine={false} tickLine={false} tick={{fontSize: 9, fontWeight: 700}} />
+                  <Tooltip 
+                    cursor={{ fill: 'rgba(0,0,0,0.02)' }}
+                    contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', padding: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                    itemStyle={{ fontSize: '10px', fontWeight: 'bold' }}
+                    labelStyle={{ fontSize: '11px', fontWeight: 'black', color: '#0f172a', marginBottom: '4px' }}
+                  />
+                  <Legend verticalAlign="top" height={36} iconType="circle" align="right" wrapperStyle={{fontSize: '9px', fontWeight: 'black', textTransform: 'uppercase', letterSpacing: '0.05em'}} />
+                  <Line yAxisId="left" type="monotone" dataKey="hrv" name="HRV (ms)" stroke="#f43f5e" strokeWidth={2.5} connectNulls={true} dot={chartViewMode === 'weekly' ? { r: 3, fill: '#f43f5e', strokeWidth: 0 } : false} />
+                  <Line yAxisId="right" type="monotone" dataKey="pulse" name="RHR (bpm)" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 4" connectNulls={true} dot={chartViewMode === 'weekly' ? { r: 2, fill: '#94a3b8', strokeWidth: 0 } : false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Technical Dose Analysis */}
-        <section className="bg-[#1e293b] p-8 rounded-2xl border border-slate-800 shadow-xl space-y-6">
+        <section className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="flex items-center gap-4">
-            <div className="p-2.5 bg-slate-900 border border-slate-700 text-cyan-400 rounded-lg">
+            <div className="p-2.5 bg-slate-50 border border-slate-200 text-cyan-600 rounded-lg">
               <Pill size={24} />
             </div>
             <div>
-              <h3 className="text-lg font-black text-white uppercase tracking-tighter">Metabolic Efficiency Matrix</h3>
-              <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-0.5">Dose response analysis relative to training output.</p>
+              <h3 className="text-lg font-black text-slate-900 uppercase tracking-tighter">Metabolic Efficiency Matrix</h3>
+              <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Dose response analysis relative to training output.</p>
             </div>
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/50 overflow-hidden">
+            <div className="rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden">
               <table className="w-full text-left text-[11px] font-bold">
-                <thead className="bg-[#0f172a] text-slate-500 uppercase tracking-widest border-b border-slate-800">
+                <thead className="bg-slate-100 text-slate-500 uppercase tracking-widest border-b border-slate-200">
                   <tr>
                     <th className="px-6 py-3">Cycle Protocol</th>
+                    <th className="px-6 py-3 text-center">Start</th>
+                    <th className="px-6 py-3 text-center">End</th>
                     <th className="px-6 py-3 text-center">Mass Δ</th>
                     <th className="px-6 py-3 text-center">Load (TSS)</th>
                     <th className="px-6 py-3 text-right">Duration</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800">
+                <tbody className="divide-y divide-slate-200">
                   {doseSegments.map((seg, i) => (
-                    <tr key={i} className="hover:bg-cyan-500/5 transition-colors group">
+                    <tr key={i} className="hover:bg-cyan-50 transition-colors group">
                       <td className="px-6 py-4">
-                        <div className="text-white group-hover:text-cyan-400 transition-colors uppercase tracking-tight">{seg.dose} Protocol</div>
-                        <div className="text-[9px] text-slate-500">{seg.startDate}</div>
+                        <div className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight">{seg.dose} Protocol</div>
+                        <div className="text-[9px] text-slate-400">{seg.startDate}</div>
+                      </td>
+                      <td className="px-6 py-4 text-center text-slate-600">
+                        {seg.startWeight ? `${seg.startWeight.toFixed(1)}kg` : '—'}
+                      </td>
+                      <td className="px-6 py-4 text-center text-slate-600">
+                        {seg.endWeight ? `${seg.endWeight.toFixed(1)}kg` : '—'}
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-1 rounded ${seg.weightLoss > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800 text-slate-500'}`}>
+                        <span className={`px-2 py-1 rounded ${seg.weightLoss > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
                           {seg.weightLoss > 0 ? `-${seg.weightLoss}kg` : 'STABLE'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-center text-amber-500 font-mono">{seg.totalTss}</td>
-                      <td className="px-6 py-4 text-right text-slate-400 uppercase text-[9px]">{seg.days}d</td>
+                      <td className="px-6 py-4 text-center text-amber-600 font-mono">{seg.totalTss}</td>
+                      <td className="px-6 py-4 text-right text-slate-500 uppercase text-[9px]">{seg.days}d</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <div className="h-[350px] bg-[#0f172a]/50 rounded-xl p-4 border border-slate-800">
+            <div className="h-[350px] bg-slate-50/50 rounded-xl p-4 border border-slate-200">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={doseSegments} margin={{ top: 10, right: 10, bottom: 0, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                  {/* Fixed invalid SVG attribute textTransform on XAxis tick object below */}
-                  <XAxis dataKey="dose" axisLine={false} tickLine={false} tick={{ fontSize: 9, fontWeight: 900, fill: '#475569' }} />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="dose" axisLine={false} tickLine={false} tick={{ fontSize: 9, fontWeight: 900, fill: '#64748b' }} />
                   <YAxis yAxisId="loss" orientation="left" stroke="#10b981" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
-                  <YAxis yAxisId="tss" orientation="right" stroke="#f59e0b" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px' }} />
-                  <Bar yAxisId="tss" dataKey="totalTss" name="Cumulative Load" fill="#f59e0b" radius={[2, 2, 0, 0]} opacity={0.1} />
+                  <YAxis yAxisId="tss" orientation="right" stroke="#d97706" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
+                  <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
+                  <Bar yAxisId="tss" dataKey="totalTss" name="Cumulative Load" fill="#d97706" radius={[2, 2, 0, 0]} opacity={0.1} />
                   <Line yAxisId="loss" type="monotone" dataKey="weightLoss" name="Mass Loss Efficiency" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} />
                 </ComposedChart>
               </ResponsiveContainer>
-              <p className="text-center text-[9px] font-black text-slate-600 uppercase tracking-[0.2em] mt-2">Correlation Analysis: Mass Reduction vs Mechanical Work (TSS)</p>
+              <p className="text-center text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mt-2">Correlation Analysis: Mass Reduction vs Mechanical Work (TSS)</p>
             </div>
           </div>
         </section>
 
         {/* AI Performance Lab */}
-        <section className="bg-[#1e293b] rounded-2xl border border-slate-800 shadow-2xl overflow-hidden flex flex-col h-[700px]">
-          <div className="bg-[#0f172a] px-8 py-6 flex items-center justify-between border-b border-slate-800">
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-md overflow-hidden flex flex-col h-[700px]">
+          <div className="bg-slate-50 px-8 py-6 flex items-center justify-between border-b border-slate-200">
             <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-cyan-600 flex items-center justify-center text-white shadow-xl shadow-cyan-900/20">
+              <div className="w-12 h-12 rounded-xl bg-cyan-600 flex items-center justify-center text-white shadow-lg">
                 <Sparkles size={24} />
               </div>
               <div>
-                <h3 className="text-white text-md font-black uppercase tracking-tighter">AI Performance Insights</h3>
+                <h3 className="text-slate-900 text-md font-black uppercase tracking-tighter">AI Performance Insights</h3>
                 <p className="text-slate-500 text-[9px] font-black uppercase tracking-widest mt-0.5">LLM Driven Correlation & Trend Detection</p>
               </div>
             </div>
             {isLoading && (
-              <div className="flex items-center gap-3 text-cyan-400 text-[9px] font-black tracking-[0.2em] animate-pulse">
+              <div className="flex items-center gap-3 text-cyan-600 text-[9px] font-black tracking-[0.2em] animate-pulse">
                 <RefreshCw size={14} className="animate-spin" />
                 COMPUTING
               </div>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-slate-900/20 no-scrollbar">
+          <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-slate-50/30 no-scrollbar">
             {chatHistory.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center max-w-lg mx-auto">
-                <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mb-6">
-                  <Info size={24} className="text-cyan-400" />
+                <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-6">
+                  <Info size={24} className="text-cyan-600" />
                 </div>
-                <h4 className="text-xl font-black text-white uppercase tracking-tighter">Integrated Lab Diagnostics</h4>
+                <h4 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Integrated Lab Diagnostics</h4>
                 <p className="text-slate-500 text-xs font-medium mt-3 leading-relaxed">System ready. Current dataset covers metabolic efficiency and training load responses. Select a protocol query or input custom analysis parameters.</p>
                 <div className="grid grid-cols-1 gap-2 mt-8 w-full">
                   {[
@@ -469,7 +593,7 @@ export default function App() {
                     "Detect training stress plateaus",
                     "Evaluate dose-protocol efficiency"
                   ].map(q => (
-                    <button key={q} onClick={() => setUserInput(q)} className="px-4 py-3 bg-slate-800/50 border border-slate-700/50 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-cyan-600 hover:border-cyan-500 transition-all text-left text-slate-400 hover:text-white">
+                    <button key={q} onClick={() => setUserInput(q)} className="px-4 py-3 bg-white border border-slate-200 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-cyan-600 hover:border-cyan-500 transition-all text-left text-slate-500 hover:text-white shadow-sm">
                       {q}
                     </button>
                   ))}
@@ -480,12 +604,12 @@ export default function App() {
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[80%] p-6 rounded-xl ${
                   msg.role === 'user' 
-                    ? 'bg-cyan-600 text-white rounded-tr-none shadow-xl' 
-                    : 'bg-slate-800/80 border border-slate-700 text-slate-300 rounded-tl-none shadow-inner'
+                    ? 'bg-cyan-600 text-white rounded-tr-none shadow-md' 
+                    : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'
                 }`}>
-                  <div className="text-sm font-medium leading-relaxed font-mono">
+                  <div className="text-base font-semibold leading-relaxed font-sans tracking-tight">
                     {msg.text.split('\n').map((line, idx) => (
-                      <p key={idx} className={idx > 0 ? 'mt-4' : ''}>{line}</p>
+                      <p key={idx} className={idx > 0 ? 'mt-3' : ''}>{line}</p>
                     ))}
                   </div>
                 </div>
@@ -493,16 +617,16 @@ export default function App() {
             ))}
             <div ref={chatEndRef} />
           </div>
-          <div className="p-6 bg-[#0f172a] border-t border-slate-800 flex gap-4">
+          <div className="p-6 bg-white border-t border-slate-200 flex gap-4">
             <input 
               type="text" 
               value={userInput}
               onChange={(e) => setUserInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
               placeholder="Query performance model..."
-              className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-6 py-4 text-xs focus:ring-2 focus:ring-cyan-500/50 outline-none transition-all font-bold text-white placeholder:text-slate-700 placeholder:uppercase"
+              className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-6 py-4 text-xs focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all font-bold text-slate-900 placeholder:text-slate-300 placeholder:uppercase"
             />
-            <button onClick={handleSendMessage} disabled={isLoading || !userInput.trim()} className="bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 text-white px-8 rounded-lg transition-all shadow-lg active:scale-95 flex items-center gap-3 font-black text-xs uppercase tracking-widest">
+            <button onClick={handleSendMessage} disabled={isLoading || !userInput.trim()} className="bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-100 disabled:text-slate-400 text-white px-8 rounded-lg transition-all shadow-md active:scale-95 flex items-center gap-3 font-black text-xs uppercase tracking-widest">
               <Sparkles size={16} />
               Analyze
             </button>
