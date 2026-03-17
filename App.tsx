@@ -7,7 +7,7 @@ import {
 import { 
   Activity, Moon, Scale, Zap, TrendingDown, MessageSquare, Sparkles,
   Heart, Upload, FileText, RefreshCw, Dumbbell, Bike, Plus, Pill, Calendar, Clock, Filter, 
-  Target, BarChart3, Info, Waves, Mountain
+  Target, BarChart3, Info, Waves, Mountain, Settings, Key
 } from 'lucide-react';
 import { DaySummary } from './types';
 import { parseTrainingPeaksCSV } from './services/dataParser';
@@ -33,6 +33,8 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [chartViewMode, setChartViewMode] = useState<'daily' | 'weekly'>('weekly');
   const [selectedWorkoutType, setSelectedWorkoutType] = useState<string>('All');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState(localStorage.getItem('GEMINI_API_KEY') || '');
   
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -90,6 +92,16 @@ export default function App() {
     const last7Days = filteredData.slice(-7);
     const lastWeekTss = last7Days.reduce((acc, d) => acc + (d.tss || 0), 0);
     
+    const lastWeekHRVEntries = last7Days.filter(d => d.hrv && d.hrv > 0);
+    const lastWeekHRV = lastWeekHRVEntries.length > 0
+      ? lastWeekHRVEntries.reduce((acc, d) => acc + (d.hrv || 0), 0) / lastWeekHRVEntries.length
+      : 0;
+
+    const lastWeekSleepEntries = last7Days.filter(d => d.sleepHours && d.sleepHours > 0);
+    const lastWeekSleep = lastWeekSleepEntries.length > 0
+      ? lastWeekSleepEntries.reduce((acc, d) => acc + (d.sleepHours || 0), 0) / lastWeekSleepEntries.length
+      : 0;
+
     const strengthCount = filteredData.filter(d => d.isStrengthDay).length;
     const totalSpanDays = data.length;
 
@@ -104,9 +116,11 @@ export default function App() {
       weightLossPercent,
       avgWeeklyLoss,
       avgHRV: avgHrv.toFixed(0),
+      lastWeekHRV: lastWeekHRV.toFixed(0),
       minHrv: minHrv.toFixed(0),
       maxHrv: maxHrv.toFixed(0),
       avgSleep: avgSleep.toFixed(1),
+      lastWeekSleep: lastWeekSleep.toFixed(1),
       totalTss: totalTss.toFixed(0),
       strengthSessions: strengthCount,
       avgWeeklyStrength,
@@ -298,12 +312,25 @@ export default function App() {
     try {
       const response = await geminiService.analyzeData(filteredData, userInput);
       setChatHistory([...newHistory, { role: 'model' as const, text: response || 'No response.' }]);
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      setChatHistory([...newHistory, { role: 'model' as const, text: 'Analysis error. Check data connection.' }]);
+      const errorMessage = error.message || 'Analysis error. Check data connection.';
+      setChatHistory([...newHistory, { role: 'model' as const, text: errorMessage }]);
+      if (errorMessage.includes('API Key')) {
+        setIsSettingsOpen(true);
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleSaveApiKey = () => {
+    if (apiKeyInput.trim()) {
+      localStorage.setItem('GEMINI_API_KEY', apiKeyInput.trim());
+    } else {
+      localStorage.removeItem('GEMINI_API_KEY');
+    }
+    setIsSettingsOpen(false);
   };
 
   if (data.length === 0) {
@@ -342,6 +369,9 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-4">
+          <button onClick={() => setIsSettingsOpen(true)} className="p-2.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-all" title="Settings">
+            <Settings size={18} />
+          </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-black uppercase tracking-widest border border-slate-200 transition-all shadow-sm">
             <Plus size={14} />
             Add Datasets
@@ -409,9 +439,16 @@ export default function App() {
             unit="ms" 
             color="green" 
             icon={<Heart size={18} />} 
-            trend={`Range: ${stats?.minHrv} - ${stats?.maxHrv} ms`} 
+            trend={`7d Avg: ${stats?.lastWeekHRV} | Range: ${stats?.minHrv}-${stats?.maxHrv}`} 
           />
-          <StatCard label="Rest duration" value={stats?.avgSleep || 0} unit="hrs" color="purple" icon={<Moon size={18} />} trend="Recovery Window" />
+          <StatCard 
+            label="Sleep Duration" 
+            value={stats?.avgSleep || 0} 
+            unit="hrs" 
+            color="purple" 
+            icon={<Moon size={18} />} 
+            trend={`7d Avg: ${stats?.lastWeekSleep} hrs`} 
+          />
           <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col justify-center">
              <div className="flex items-center gap-2 text-cyan-600 mb-1">
                 <Target size={14} />
@@ -633,6 +670,55 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {/* Settings Modal */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-cyan-50 text-cyan-600 rounded-lg">
+                  <Key size={20} />
+                </div>
+                <h3 className="font-black uppercase tracking-tighter">API Configuration</h3>
+              </div>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <Plus size={20} className="rotate-45" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Gemini API Key</label>
+                <input 
+                  type="password" 
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="Enter your API key..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all font-mono"
+                />
+                <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
+                  Your key is stored locally in your browser and never sent to our servers. 
+                  You can get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">AI Studio</a>.
+                </p>
+              </div>
+            </div>
+            <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-3">
+              <button 
+                onClick={() => setIsSettingsOpen(false)}
+                className="flex-1 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleSaveApiKey}
+                className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-md transition-all"
+              >
+                Save Configuration
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

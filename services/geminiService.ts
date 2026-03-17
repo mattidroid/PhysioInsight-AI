@@ -8,8 +8,16 @@ export class GeminiService {
    * Creates a new GoogleGenAI instance on each call to ensure latest API key usage.
    */
   async analyzeData(data: DaySummary[], userPrompt: string) {
+    // Check for user-provided API key in localStorage first
+    const customKey = typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') : null;
+    const apiKey = customKey || process.env.API_KEY;
+
+    if (!apiKey) {
+      throw new Error("Gemini API Key is missing. Please provide one in settings.");
+    }
+
     // Always use the named parameter for API key and create a fresh instance
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey });
 
     const systemInstruction = `
       You are an expert physiological data analyst and elite sports coach. 
