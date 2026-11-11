@@ -3,20 +3,23 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   Area, ScatterChart, Scatter, Legend, ComposedChart, Bar, Line,
-  ReferenceArea, Label
+  ReferenceArea, Label, BarChart, Cell
 } from 'recharts';
 import { 
   Activity, Moon, Scale, Zap, TrendingDown, MessageSquare, Sparkles,
   Heart, Upload, FileText, RefreshCw, Dumbbell, Bike, Plus, Pill, Calendar, Clock, Filter, 
-  Target, BarChart3, Info, Waves, Mountain, Settings, Key, Printer, Maximize2, MoveVertical
+  Target, BarChart3, Info, Waves, Mountain, Printer, Maximize2, MoveVertical, Settings, Key
 } from 'lucide-react';
 import { DaySummary } from './types';
 import { parseTrainingPeaksCSV } from './services/dataParser';
 import { geminiService } from './services/geminiService';
 import { StatCard } from './components/StatCard';
+import ReactMarkdown from 'react-markdown';
 
 interface DoseSegment {
+  cycleIndex: number;
   dose: string;
+  chartLabel: string;
   startDate: string;
   endDate: string;
   startWeight: number | null;
@@ -35,10 +38,10 @@ export default function App() {
   const [chartViewMode, setChartViewMode] = useState<'daily' | 'weekly'>('weekly');
   const [selectedWorkoutType, setSelectedWorkoutType] = useState<string>('All');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState(typeof window !== 'undefined' ? (localStorage.getItem('GEMINI_API_KEY') || '') : '');
   const [showPrintHint, setShowPrintHint] = useState(false);
   const [splitRatio, setSplitRatio] = useState(50);
   const [totalChartHeight, setTotalChartHeight] = useState(850);
-  const [apiKeyInput, setApiKeyInput] = useState(localStorage.getItem('GEMINI_API_KEY') || '');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
   const [targetWeight, setTargetWeight] = useState<number | null>(null);
@@ -215,12 +218,12 @@ export default function App() {
     };
   }, [filteredData, data.length]);
 
-  const doseSegments = useMemo(() => {
+  const allDoseSegments = useMemo(() => {
     if (workoutFilteredData.length === 0) return [];
     const segments: DoseSegment[] = [];
     const doseDayIndices: number[] = [];
     workoutFilteredData.forEach((day, idx) => {
-      if (day.notes?.match(/(\d+(?:\.\d+)?)\s*mg/i)) doseDayIndices.push(idx);
+      if (day.notes?.match(/([\d.]+(?:mg\/[\d.]+)?|[\d.]+(?:\/[\d.]+)?)\s*mg/i)) doseDayIndices.push(idx);
     });
     if (doseDayIndices.length === 0) return [];
 
@@ -228,8 +231,13 @@ export default function App() {
       const startIdx = doseDayIndices[i];
       const nextDoseIdx = doseDayIndices[i + 1]; 
       const startDay = workoutFilteredData[startIdx];
-      const doseMatch = startDay.notes?.match(/(\d+(?:\.\d+)?)\s*mg/i);
-      const doseValue = doseMatch ? `${doseMatch[1]}mg` : "Unknown";
+      
+      const doseMatch = startDay.notes?.match(/([\d.]+(?:mg\/[\d.]+)?|[\d.]+(?:\/[\d.]+)?)\s*mg/i);
+      let doseValue = "Unknown";
+      if (doseMatch) {
+        let val = doseMatch[1].replace(/mg\//i, '/');
+        doseValue = `${val}mg`;
+      }
 
       let startWeight = workoutFilteredData[startIdx].weight || null;
       if (startWeight === null) {
@@ -266,12 +274,25 @@ export default function App() {
       const tssLimit = nextDoseIdx !== undefined ? nextDoseIdx : workoutFilteredData.length;
       for (let j = startIdx; j < tssLimit; j++) totalTss += (workoutFilteredData[j].tss || 0);
 
+      const startDate = workoutFilteredData[startIdx]?.date || "Unknown";
+      const endDate = nextDoseIdx !== undefined 
+        ? (workoutFilteredData[nextDoseIdx]?.date || "Unknown") 
+        : (workoutFilteredData[workoutFilteredData.length - 1]?.date || "Unknown");
+
+      const startDateObj = new Date(startDate);
+      const shortDate = !isNaN(startDateObj.getTime())
+        ? startDateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : startDate;
+
+      const cycleIndex = i + 1;
+      const chartLabel = `#${cycleIndex} · ${doseValue} (${shortDate})`;
+
       segments.push({
+        cycleIndex,
         dose: doseValue,
-        startDate: workoutFilteredData[startIdx]?.date || "Unknown",
-        endDate: nextDoseIdx !== undefined 
-          ? (workoutFilteredData[nextDoseIdx]?.date || "Unknown") 
-          : (workoutFilteredData[workoutFilteredData.length - 1]?.date || "Unknown"),
+        chartLabel,
+        startDate,
+        endDate,
         startWeight,
         endWeight,
         weightLoss: (startWeight && endWeight) ? parseFloat((startWeight - endWeight).toFixed(1)) : 0,
@@ -281,6 +302,86 @@ export default function App() {
     }
     return segments;
   }, [workoutFilteredData]);
+
+  const doseSegments = useMemo(() => {
+    if (allDoseSegments.length === 0) return [];
+    return allDoseSegments.filter(seg => {
+      if (startDate && seg.endDate <= startDate) return false;
+      if (endDate && seg.startDate > endDate) return false;
+      return true;
+    });
+  }, [allDoseSegments, startDate, endDate]);
+  
+  const monthlyStats = useMemo(() => {
+    if (filteredData.length === 0) return [];
+    
+    const groups: Record<string, typeof filteredData> = {};
+    filteredData.forEach(d => {
+      if (!d || !d.date) return;
+      const monthKey = d.date.substring(0, 7); // "YYYY-MM"
+      if (!groups[monthKey]) {
+        groups[monthKey] = [];
+      }
+      groups[monthKey].push(d);
+    });
+
+    const monthKeys = Object.keys(groups).sort();
+    
+    return monthKeys.map((monthKey, idx) => {
+      const daysInMonth = groups[monthKey];
+      const weightDays = daysInMonth.filter(d => d.weight && d.weight > 0);
+      
+      let startWeight = weightDays.length > 0 ? weightDays[0].weight : null;
+      if (idx > 0) {
+        const prevMonthKey = monthKeys[idx - 1];
+        const prevWeightDays = groups[prevMonthKey].filter(d => d.weight && d.weight > 0);
+        if (prevWeightDays.length > 0) {
+          startWeight = prevWeightDays[prevWeightDays.length - 1].weight;
+        }
+      }
+
+      const endWeight = weightDays.length > 0 ? weightDays[weightDays.length - 1].weight : null;
+      
+      const weightsOfThisMonth = weightDays.map(d => d.weight as number);
+      const minWeight = weightsOfThisMonth.length > 0 ? Math.min(...weightsOfThisMonth) : null;
+      const maxWeight = weightsOfThisMonth.length > 0 ? Math.max(...weightsOfThisMonth) : null;
+      const avgWeight = weightsOfThisMonth.length > 0 ? weightsOfThisMonth.reduce((a, b) => a + b, 0) / weightsOfThisMonth.length : null;
+      
+      const totalTss = Math.round(daysInMonth.reduce((acc, d) => acc + (d.tss || 0), 0));
+      const totalSleep = daysInMonth.reduce((acc, d) => acc + (d.sleepHours || 0), 0);
+      const daysWithSleep = daysInMonth.filter(d => d.sleepHours && d.sleepHours > 0).length;
+      const avgSleep = daysWithSleep > 0 ? totalSleep / daysWithSleep : null;
+
+      let weightLoss = 0;
+      let weightLossPercent = 0;
+      if (startWeight && endWeight) {
+        weightLoss = startWeight - endWeight;
+        weightLossPercent = (weightLoss / startWeight) * 100;
+      }
+
+      const dateParts = monthKey.split('-');
+      const year = parseInt(dateParts[0], 10);
+      const monthIdx = parseInt(dateParts[1], 10) - 1;
+      const dateObj = new Date(year, monthIdx, 2);
+      const monthName = dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+
+      return {
+        monthKey,
+        monthName,
+        startWeight,
+        endWeight,
+        minWeight,
+        maxWeight,
+        avgWeight,
+        weightLoss,
+        weightLossPercent,
+        totalTss,
+        avgSleep,
+        logCount: weightDays.length,
+        daysInMonth: daysInMonth.length
+      };
+    });
+  }, [filteredData]);
 
   const interpolateData = (dataset: any[], key: string) => {
     const result = [...dataset];
@@ -618,7 +719,7 @@ export default function App() {
       console.error(error);
       const errorMessage = error.message || 'Analysis error. Check data connection.';
       setChatHistory([...newHistory, { role: 'model' as const, text: errorMessage }]);
-      if (errorMessage.includes('API Key')) {
+      if (errorMessage.toLowerCase().includes('api key') || errorMessage.toLowerCase().includes('unauthenticated')) {
         setIsSettingsOpen(true);
       }
     } finally {
@@ -693,7 +794,7 @@ export default function App() {
             <Printer size={14} />
             Print Report
           </button>
-          <button onClick={() => setIsSettingsOpen(true)} className="p-2.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-all" title="Settings">
+          <button onClick={() => setIsSettingsOpen(true)} className="p-2.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-all" title="Settings / API Key">
             <Settings size={18} />
           </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-black uppercase tracking-widest border border-slate-200 transition-all shadow-sm">
@@ -967,6 +1068,15 @@ export default function App() {
                       }
                       return new Date(label).toLocaleDateString();
                     }}
+                    formatter={(value: any, name: string) => {
+                      if (name === 'Load (TSS)') {
+                        return [`${Math.round(value)}`, name];
+                      }
+                      if (name === 'Mass (kg)' || name === 'Weight Trend (7d)' || name === 'Projection') {
+                        return [`${parseFloat(value).toFixed(1)} kg`, name];
+                      }
+                      return [value, name];
+                    }}
                   />
                   <Legend 
                     verticalAlign="top" 
@@ -1154,42 +1264,218 @@ export default function App() {
                   {doseSegments.map((seg, i) => (
                     <tr key={i} className="hover:bg-cyan-50 transition-colors group">
                       <td className="px-6 py-4">
-                        <div className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight">{seg.dose} Protocol</div>
-                        <div className="text-[9px] text-slate-400">{seg.startDate}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-black text-cyan-600 bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200/60 font-mono">
+                            #{seg.cycleIndex}
+                          </span>
+                          <span className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight font-black">
+                            {seg.dose} Protocol
+                          </span>
+                        </div>
+                        <div className="text-[9px] text-slate-400 mt-0.5">{seg.startDate} → {seg.endDate}</div>
                       </td>
-                      <td className="px-6 py-4 text-center text-slate-600">
+                      <td className="px-6 py-4 text-center text-slate-600 font-mono">
                         {seg.startWeight ? `${seg.startWeight.toFixed(1)}kg` : '—'}
                       </td>
-                      <td className="px-6 py-4 text-center text-slate-600">
+                      <td className="px-6 py-4 text-center text-slate-600 font-mono">
                         {seg.endWeight ? `${seg.endWeight.toFixed(1)}kg` : '—'}
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-1 rounded ${seg.weightLoss > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
-                          {seg.weightLoss > 0 ? `-${seg.weightLoss}kg` : 'STABLE'}
+                        <span className={`px-2 py-1 rounded inline-flex items-center gap-1 font-mono text-[10px] ${
+                          seg.weightLoss > 0 
+                            ? 'bg-emerald-100 text-emerald-800 font-bold' 
+                            : seg.weightLoss < 0 
+                            ? 'bg-rose-100 text-rose-800 font-bold' 
+                            : 'bg-slate-100 text-slate-500'
+                        }`}>
+                          {seg.weightLoss > 0 
+                            ? `-${seg.weightLoss.toFixed(1)}kg` 
+                            : seg.weightLoss < 0 
+                            ? `+${Math.abs(seg.weightLoss).toFixed(1)}kg` 
+                            : 'STABLE'}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-center text-amber-600 font-mono">{seg.totalTss}</td>
                       <td className="px-6 py-4 text-right text-slate-500 uppercase text-[9px]">{seg.days}d</td>
                     </tr>
                   ))}
+                  {doseSegments.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium text-xs">
+                        No medication cycles recorded in this date range.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
-            <div className="bg-slate-50/50 rounded-xl p-6 border border-slate-200 flex flex-col h-full min-h-[400px]">
-              <div className="mb-6">
+            <div className="bg-slate-50/50 rounded-xl p-6 border border-slate-200 flex flex-col h-full min-h-[440px]">
+              <div className="mb-4">
                 <h4 className="text-center text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Correlation Analysis: Mass Reduction vs Mechanical Work (TSS)</h4>
               </div>
               <div className="flex-1 min-h-0">
+                {doseSegments.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-slate-400 text-xs font-bold uppercase tracking-wider">
+                    No medication cycles in selected date range
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={doseSegments} margin={{ top: 10, right: 15, bottom: 35, left: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                      <XAxis 
+                        dataKey="chartLabel" 
+                        axisLine={false} 
+                        tickLine={false} 
+                        angle={-30} 
+                        textAnchor="end" 
+                        height={55}
+                        tick={{ fontSize: 9, fontWeight: 800, fill: '#64748b' }} 
+                        interval={0}
+                      />
+                      <YAxis yAxisId="loss" orientation="left" stroke="#10b981" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
+                      <YAxis yAxisId="tss" orientation="right" stroke="#d97706" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#fff', border: '1px solid #cbd5e1', borderRadius: '10px', fontSize: '11px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+                        labelStyle={{ fontWeight: 800, color: '#0f172a', marginBottom: '6px', fontSize: '11px' }}
+                        labelFormatter={(_label, payload) => {
+                          const item = payload?.[0]?.payload as DoseSegment | undefined;
+                          if (!item) return _label;
+                          return `Cycle #${item.cycleIndex}: ${item.dose} Protocol (${item.startDate} → ${item.endDate})`;
+                        }}
+                        formatter={(value: any, name: string, item: any) => {
+                          const seg = item?.payload as DoseSegment | undefined;
+                          if (name === "Cumulative Load") {
+                            return [`${Math.round(value)} TSS (${seg?.days || 0} days)`, name];
+                          }
+                          if (name === "Mass Loss Efficiency") {
+                            const lossVal = parseFloat(value);
+                            const signStr = lossVal > 0 ? `-${lossVal.toFixed(1)} kg` : lossVal < 0 ? `+${Math.abs(lossVal).toFixed(1)} kg` : `0.0 kg`;
+                            const weightDetail = seg && seg.startWeight && seg.endWeight ? ` (${seg.startWeight.toFixed(1)}kg → ${seg.endWeight.toFixed(1)}kg)` : '';
+                            return [`${signStr}${weightDetail}`, "Mass Delta (Loss)"];
+                          }
+                          return [value, name];
+                        }}
+                      />
+                      <Bar yAxisId="tss" dataKey="totalTss" name="Cumulative Load" fill="#d97706" radius={[2, 2, 0, 0]} opacity={0.12} />
+                      <Line yAxisId="loss" type="monotone" dataKey="weightLoss" name="Mass Loss Efficiency" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981', strokeWidth: 1, stroke: '#fff' }} activeDot={{ r: 6 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Monthly Weight & Metabolic Progress */}
+        <section className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="p-2.5 bg-slate-50 border border-slate-200 text-cyan-600 rounded-lg">
+                <Calendar size={24} />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tighter">Monthly Progress & Caloric Trend</h3>
+                <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Calendar-month aggregation of mass reduction and training patterns.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-5 gap-8">
+            <div className="xl:col-span-3 rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden flex flex-col h-[240px]">
+              <div className="overflow-auto flex-1 relative">
+                <table className="w-full text-left text-[11px] font-bold min-w-[600px] border-collapse">
+                  <thead className="text-slate-500 uppercase tracking-widest border-b border-slate-200 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-6 py-3 bg-slate-100">Calendar Month</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Start Weight</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">End Weight</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Mass Change</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Limits (Min / Max)</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Daily Sleep (Avg)</th>
+                      <th className="px-6 py-3 text-right bg-slate-100">TSS Load</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white/50">
+                    {monthlyStats.map((item, i) => (
+                      <tr key={i} className="hover:bg-cyan-50/85 transition-colors group">
+                        <td className="px-6 py-3">
+                          <div className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight">{item.monthName}</div>
+                          <div className="text-[9px] text-slate-400 font-medium">{item.logCount} weight logs / {item.daysInMonth} days</div>
+                        </td>
+                        <td className="px-6 py-3 text-center text-slate-600 font-mono">
+                          {item.startWeight ? `${item.startWeight.toFixed(1)}kg` : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-center text-slate-600 font-mono">
+                          {item.endWeight ? `${item.endWeight.toFixed(1)}kg` : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-center">
+                          {item.startWeight && item.endWeight ? (
+                            <span className={`px-2 py-0.5 rounded inline-flex items-center gap-1 text-[10px] ${
+                              item.weightLoss > 0 
+                                ? 'bg-emerald-100/85 text-emerald-800' 
+                                : item.weightLoss < 0 
+                                ? 'bg-rose-100/85 text-rose-800' 
+                                : 'bg-slate-100/85 text-slate-600'
+                            }`}>
+                              {item.weightLoss > 0 ? (
+                                <>
+                                  <TrendingDown size={10} />
+                                  -{item.weightLoss.toFixed(1)}kg (-{item.weightLossPercent.toFixed(1)}%)
+                                </>
+                              ) : item.weightLoss < 0 ? (
+                                <>
+                                  <TrendingDown size={10} className="rotate-180 text-rose-600" />
+                                  +{Math.abs(item.weightLoss).toFixed(1)}kg (+{Math.abs(item.weightLossPercent).toFixed(1)}%)
+                                </>
+                              ) : (
+                                'STABLE'
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-3 text-center text-slate-500 font-mono">
+                          {item.minWeight && item.maxWeight ? `${item.minWeight.toFixed(1)} - ${item.maxWeight.toFixed(1)}kg` : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-center text-slate-600 font-mono">
+                          {item.avgSleep ? `${item.avgSleep.toFixed(1)} hrs` : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-right text-amber-600 font-mono">{item.totalTss}</td>
+                      </tr>
+                    ))}
+                    {monthlyStats.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-6 py-8 text-center text-slate-400 font-medium">
+                          No historical logs within selected range.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="xl:col-span-2 bg-slate-50/50 rounded-xl p-5 border border-slate-200 flex flex-col h-[240px]">
+              <div className="mb-2">
+                <h4 className="text-center text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Monthly Weight Loss Profile (kg)</h4>
+              </div>
+              <div className="flex-1 min-h-0">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={doseSegments} margin={{ top: 10, right: 10, bottom: 0, left: 10 }}>
+                  <BarChart data={monthlyStats} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                    <XAxis dataKey="dose" axisLine={false} tickLine={false} tick={{ fontSize: 9, fontWeight: 900, fill: '#64748b' }} />
-                    <YAxis yAxisId="loss" orientation="left" stroke="#10b981" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
-                    <YAxis yAxisId="tss" orientation="right" stroke="#d97706" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
-                    <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
-                    <Bar yAxisId="tss" dataKey="totalTss" name="Cumulative Load" fill="#d97706" radius={[2, 2, 0, 0]} opacity={0.1} />
-                    <Line yAxisId="loss" type="monotone" dataKey="weightLoss" name="Mass Loss Efficiency" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} />
-                  </ComposedChart>
+                    <XAxis dataKey="monthName" axisLine={false} tickLine={false} tickFormatter={(val) => val.split(' ')[0]} tick={{ fontSize: 9, fontWeight: 900, fill: '#64748b' }} />
+                    <YAxis stroke="#10b981" axisLine={false} tickLine={false} tick={{fontSize: 9}} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '11px' }}
+                      formatter={(value: any) => [`${parseFloat(value).toFixed(1)} kg`, "Weight Lost"]}
+                    />
+                    <Bar dataKey="weightLoss" fill="#10b981" radius={[4, 4, 0, 0]} opacity={0.8}>
+                      {monthlyStats.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.weightLoss >= 0 ? '#10b981' : '#f43f5e'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
                 </ResponsiveContainer>
               </div>
             </div>
@@ -1239,15 +1525,39 @@ export default function App() {
             )}
             {chatHistory.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] p-6 rounded-xl ${
+                <div className={`max-w-[85%] sm:max-w-[75%] p-5 sm:p-6 rounded-2xl ${
                   msg.role === 'user' 
-                    ? 'bg-cyan-600 text-white rounded-tr-none shadow-md' 
+                    ? 'bg-cyan-600 text-white rounded-tr-none shadow-md text-sm font-medium leading-relaxed font-sans tracking-tight' 
                     : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'
                 }`}>
-                  <div className="text-base font-semibold leading-relaxed font-sans tracking-tight">
-                    {msg.text.split('\n').map((line, idx) => (
-                      <p key={idx} className={idx > 0 ? 'mt-3' : ''}>{line}</p>
-                    ))}
+                  <div className="text-sm font-normal leading-relaxed font-sans text-slate-700">
+                    {msg.role === 'user' ? (
+                      msg.text.split('\n').map((line, idx) => (
+                        <p key={idx} className={idx > 0 ? 'mt-2' : ''}>{line}</p>
+                      ))
+                    ) : (
+                      <div className="markdown-body">
+                        <ReactMarkdown
+                          components={{
+                            h1: ({ node, ...props }) => <h1 className="text-base font-black text-slate-900 tracking-tight mt-5 mb-2 border-b border-slate-100 pb-1.5 uppercase text-cyan-800" {...props} />,
+                            h2: ({ node, ...props }) => <h2 className="text-sm font-extrabold text-slate-800 tracking-tight mt-4 mb-2" {...props} />,
+                            h3: ({ node, ...props }) => <h3 className="text-[11px] font-black text-cyan-700 uppercase tracking-widest mt-3.5 mb-1.5" {...props} />,
+                            p: ({ node, ...props }) => <p className="text-slate-600 text-xs sm:text-sm mb-3.5 leading-relaxed font-medium" {...props} />,
+                            ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-3.5 space-y-1.5 text-slate-600 text-xs sm:text-sm font-medium" {...props} />,
+                            ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-3.5 space-y-1.5 text-slate-600 text-xs sm:text-sm font-medium" {...props} />,
+                            li: ({ node, ...props }) => <li className="mb-0.5" {...props} />,
+                            strong: ({ node, ...props }) => <strong className="font-bold text-slate-900 bg-slate-100/40 px-0.5 rounded" {...props} />,
+                            em: ({ node, ...props }) => <em className="italic text-slate-800" {...props} />,
+                            blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-cyan-500 pl-4 py-1.5 italic bg-cyan-50/50 rounded-r-lg mb-4 text-slate-600 text-xs font-semibold" {...props} />,
+                            code: ({ node, ...props }) => (
+                              <code className="bg-slate-100/80 text-rose-600 px-1.5 py-0.5 rounded-md font-mono text-[11px] font-semibold border border-slate-200/50" {...props} />
+                            ),
+                          }}
+                        >
+                          {msg.text}
+                        </ReactMarkdown>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1293,12 +1603,11 @@ export default function App() {
                   type="password" 
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Enter your API key..."
+                  placeholder="Enter your Gemini API key (AIzaSy...)"
                   className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all font-mono"
                 />
                 <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
-                  Your key is stored locally in your browser and never sent to our servers. 
-                  You can get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">AI Studio</a>.
+                  Provide your Gemini API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">Google AI Studio</a>, or configure <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">GEMINI_API_KEY</code> in Settings &gt; Secrets.
                 </p>
               </div>
             </div>

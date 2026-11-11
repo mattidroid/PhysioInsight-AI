@@ -1,6 +1,26 @@
 
 import { DaySummary } from '../types';
 
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  result.push(current.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+  return result;
+}
+
 /**
  * Robust CSV parser that handles quoted fields and identifies file types.
  */
@@ -26,14 +46,7 @@ export function parseTrainingPeaksCSV(csvContent: string, existingData: DaySumma
   const energyIdx = rawHeaders.indexOf('energy');
 
   lines.slice(1).forEach(line => {
-    // Regex to handle quoted CSV fields with commas inside
-    const matches = [];
-    let match;
-    const regex = /(?:"([^"]*(?:""[^"]*)*)"|([^",\s]+))/g;
-    
-    while ((match = regex.exec(line)) !== null) {
-      matches.push(match[1] || match[2] || "");
-    }
+    const matches = parseCSVLine(line);
 
     if (isMetricsFile && matches.length >= 3) {
       const date = matches[0].split(' ')[0];

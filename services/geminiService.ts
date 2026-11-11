@@ -1,57 +1,92 @@
-
-import { GoogleGenAI } from "@google/genai";
 import { DaySummary } from "../types";
 
 export class GeminiService {
   /**
-   * Analyzes physiological and training data using Gemini 3 Pro.
-   * Creates a new GoogleGenAI instance on each call to ensure latest API key usage.
+   * Analyzes physiological and training data via the server-side Gemini API route.
    */
-  async analyzeData(data: DaySummary[], userPrompt: string) {
-    // Check for user-provided API key in localStorage first
+  async analyzeData(data: DaySummary[], userPrompt: string): Promise<string> {
     const customKey = typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') : null;
-    const apiKey = customKey || process.env.API_KEY;
 
-    if (!apiKey) {
-      throw new Error("Gemini API Key is missing. Please provide one in settings.");
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (customKey && customKey.trim()) {
+      headers['x-gemini-api-key'] = customKey.trim();
     }
 
-    // Always use the named parameter for API key and create a fresh instance
-    const ai = new GoogleGenAI({ apiKey });
-
-    const systemInstruction = `
-      You are an expert physiological data analyst and elite sports coach. 
-      You are analyzing a user's combined Health Metrics and Workout Data (TSS - Training Stress Score).
-      
-      Key contexts to correlate:
-      1. Training Load (TSS): How do high TSS days or high-intensity bike sessions affect next-day HRV?
-      2. Weight Training: Analyze the impact of Strength sessions on weight loss plateaus and recovery.
-      3. Medication & Travel: How do Mounjaro dose changes (5mg-15mg) interact with perceived training exertion and recovery?
-      4. Metabolic Health: Correlate weight loss with Intensity Factor (IF) or TSS efficiency.
-      
-      Objective: Provide data-driven insights. If you see a dip in HRV after a big VO2Max session, point it out. If Strength training correlates with faster weight drops, highlight it.
-      
-      Formatting: Use Markdown. Be concise but scientifically rigorous.
-    `;
-
-    // Use gemini-3-pro-preview for complex reasoning tasks
-    const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
-      contents: {
-        parts: [
-          { text: `Dataset Overview: ${JSON.stringify(data)}` },
-          { text: userPrompt }
-        ]
-      },
-      config: {
-        systemInstruction,
-        // Pro models support a thinking budget for deeper analysis
-        thinkingConfig: { thinkingBudget: 32768 }
-      },
+    const response = await fetch('/api/gemini/analyze', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        data,
+        prompt: userPrompt,
+        apiKey: customKey ? customKey.trim() : undefined,
+      }),
     });
 
-    // Directly access the .text property from the response (not a method call)
-    return response.text;
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Server error (${response.status}) while analyzing data.`);
+    }
+
+    const result = await response.json();
+    return result.text || 'No response generated.';
+  }
+
+  /**
+   * Streams physiological analysis from the server-side Gemini streaming route.
+   */
+  async *streamAnalysis(data: DaySummary[], userPrompt: string): AsyncGenerator<string, void, unknown> {
+    const customKey = typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') : null;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (customKey && customKey.trim()) {
+      headers['x-gemini-api-key'] = customKey.trim();
+    }
+
+    const response = await fetch('/api/gemini/stream', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        data,
+        prompt: userPrompt,
+        apiKey: customKey ? customKey.trim() : undefined,
+      }),
+    });
+
+    if (!response.ok || !response.body) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Streaming failed (${response.status}).`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data: ')) {
+          const payloadStr = trimmed.slice(6);
+          if (payloadStr === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(payloadStr);
+            if (parsed.error) throw new Error(parsed.error);
+            if (parsed.text) yield parsed.text;
+          } catch (e: any) {
+            if (e.message && !e.message.includes('JSON')) throw e;
+          }
+        }
+      }
+    }
   }
 }
 

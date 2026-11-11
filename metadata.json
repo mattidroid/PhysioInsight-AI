@@ -1,5 +1,6 @@
 {
   "name": "PhysioInsight AI",
-  "description": "An advanced physiological data analyzer and correlator that uses Gemini 3 Pro to provide deep insights into health metrics, recovery, and lifestyle impacts.",
-  "requestFramePermissions": []
+  "description": "An advanced physiological data analyzer and correlator that uses Gemini to provide deep insights into health metrics, recovery, and lifestyle impacts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
