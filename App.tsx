@@ -8,11 +8,11 @@ import {
 import { 
   Activity, Moon, Scale, Zap, TrendingDown, MessageSquare, Sparkles,
   Heart, Upload, FileText, RefreshCw, Dumbbell, Bike, Plus, Pill, Calendar, Clock, Filter, 
-  Target, BarChart3, Info, Waves, Mountain, Printer, Maximize2, MoveVertical, Settings, Key
+  Target, BarChart3, Info, Waves, Mountain, Printer, Maximize2, MoveVertical, Settings, Key, HeartPulse, Pencil
 } from 'lucide-react';
 import { DaySummary } from './types';
 import { parseTrainingPeaksCSV } from './services/dataParser';
-import { geminiService } from './services/geminiService';
+import { geminiService, cleanGeminiErrorMessage } from './services/geminiService';
 import { StatCard } from './components/StatCard';
 import ReactMarkdown from 'react-markdown';
 
@@ -31,7 +31,7 @@ interface DoseSegment {
 
 export default function App() {
   const [data, setData] = useState<DaySummary[]>([]);
-  const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'model', text: string }[]>([]);
+  const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'model', text: string, isError?: boolean }[]>([]);
   const [userInput, setUserInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -44,6 +44,65 @@ export default function App() {
   const [totalChartHeight, setTotalChartHeight] = useState(850);
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [postSurgeryDate, setPostSurgeryDate] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('POST_SURGERY_DATE') || '2026-09-23';
+    }
+    return '2026-09-23';
+  });
+  const [isEditingPostSurgeryDate, setIsEditingPostSurgeryDate] = useState(false);
+  const [tempPostSurgeryDate, setTempPostSurgeryDate] = useState(postSurgeryDate);
+
+  const formattedPostSurgeryShort = useMemo(() => {
+    try {
+      const parts = postSurgeryDate.split('-');
+      if (parts.length === 3) {
+        const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      }
+    } catch {
+      // fallback
+    }
+    return postSurgeryDate;
+  }, [postSurgeryDate]);
+
+  const isPostSurgeryActive = useMemo(() => {
+    return startDate === postSurgeryDate;
+  }, [startDate, postSurgeryDate]);
+
+  const handleTogglePostSurgery = () => {
+    if (isPostSurgeryActive) {
+      if (data && data.length > 0) {
+        const dates = data.filter(d => d && d.date).map(d => d.date).sort();
+        if (dates.length > 0) {
+          setStartDate(dates[0]);
+        }
+      } else {
+        setStartDate('');
+      }
+    } else {
+      setStartDate(postSurgeryDate);
+      if (data && data.length > 0) {
+        const dates = data.filter(d => d && d.date).map(d => d.date).sort();
+        const lastDate = dates[dates.length - 1];
+        if (lastDate && (!endDate || endDate < postSurgeryDate)) {
+          setEndDate(lastDate);
+        }
+      }
+    }
+  };
+
+  const handleSavePostSurgeryDate = (newDate: string) => {
+    if (!newDate) return;
+    setPostSurgeryDate(newDate);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('POST_SURGERY_DATE', newDate);
+    }
+    if (isPostSurgeryActive) {
+      setStartDate(newDate);
+    }
+    setIsEditingPostSurgeryDate(false);
+  };
   const [targetWeight, setTargetWeight] = useState<number | null>(null);
   const [projectionDays, setProjectionDays] = useState<number>(30);
   const [showProjection, setShowProjection] = useState(false);
@@ -706,24 +765,61 @@ export default function App() {
     if (files) Array.from(files).forEach(processFile);
   };
 
-  const handleSendMessage = async () => {
-    if (!userInput.trim()) return;
-    const newHistory = [...chatHistory, { role: 'user' as const, text: userInput }];
-    setChatHistory(newHistory);
+  const executePrompt = async (promptText: string) => {
+    if (!promptText.trim()) return;
+    const historyWithUser = [...chatHistory, { role: 'user' as const, text: promptText.trim() }];
+    setChatHistory(historyWithUser);
     setUserInput('');
     setIsLoading(true);
+
     try {
-      const response = await geminiService.analyzeData(filteredData, userInput);
-      setChatHistory([...newHistory, { role: 'model' as const, text: response || 'No response.' }]);
+      let response: string;
+      try {
+        response = await geminiService.analyzeData(filteredData, promptText);
+      } catch (firstErr: any) {
+        const firstErrMsg = cleanGeminiErrorMessage(firstErr);
+        // If transient high demand, warmup, or reconnection error, wait 2s and retry once automatically
+        if (
+          firstErrMsg.toLowerCase().includes('traffic') ||
+          firstErrMsg.toLowerCase().includes('surge') ||
+          firstErrMsg.toLowerCase().includes('demand') ||
+          firstErrMsg.toLowerCase().includes('warming up') ||
+          firstErrMsg.toLowerCase().includes('reconnecting') ||
+          firstErrMsg.toLowerCase().includes('503') ||
+          firstErrMsg.toLowerCase().includes('502') ||
+          firstErrMsg.toLowerCase().includes('504')
+        ) {
+          await new Promise((r) => setTimeout(r, 2000));
+          response = await geminiService.analyzeData(filteredData, promptText);
+        } else {
+          throw firstErr;
+        }
+      }
+
+      setChatHistory([...historyWithUser, { role: 'model' as const, text: response || 'No response generated.' }]);
     } catch (error: any) {
-      console.error(error);
-      const errorMessage = error.message || 'Analysis error. Check data connection.';
-      setChatHistory([...newHistory, { role: 'model' as const, text: errorMessage }]);
-      if (errorMessage.toLowerCase().includes('api key') || errorMessage.toLowerCase().includes('unauthenticated')) {
+      console.error('Gemini error:', error);
+      const cleaned = cleanGeminiErrorMessage(error);
+      setChatHistory([...historyWithUser, { role: 'model' as const, text: cleaned, isError: true }]);
+      if (cleaned.toLowerCase().includes('api key') || cleaned.toLowerCase().includes('unauthenticated')) {
         setIsSettingsOpen(true);
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleSendMessage = () => {
+    if (!userInput.trim() || isLoading) return;
+    executePrompt(userInput);
+  };
+
+  const handleRetryLastPrompt = () => {
+    for (let i = chatHistory.length - 1; i >= 0; i--) {
+      if (chatHistory[i].role === 'user') {
+        executePrompt(chatHistory[i].text);
+        break;
+      }
     }
   };
 
@@ -838,41 +934,125 @@ export default function App() {
              })}
            </div>
 
-           <div className="flex items-center gap-4 bg-slate-50 p-2 rounded-lg border border-slate-200 w-full lg:w-auto">
-             <div className="flex items-center gap-2 text-slate-400 px-2 border-r border-slate-200">
-               <Calendar size={14} />
-               <span className="text-[9px] font-black uppercase tracking-widest">Date Range</span>
+           <div className="flex items-center gap-3 flex-wrap w-full lg:w-auto">
+             {/* Post-Surgery Recovery Preset Toggle */}
+             <div className="relative flex items-center shadow-sm rounded-lg">
+               <button
+                 type="button"
+                 onClick={handleTogglePostSurgery}
+                 className={`px-3 py-2 rounded-l-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 border border-r-0 ${
+                   isPostSurgeryActive
+                     ? 'bg-rose-600 border-rose-500 text-white shadow-md'
+                     : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700 hover:text-slate-900'
+                 }`}
+                 title={isPostSurgeryActive ? "Active: Click to reset to full date range" : `Click to focus on Post-Surgery Recovery (starts ${postSurgeryDate})`}
+               >
+                 <HeartPulse size={14} className={isPostSurgeryActive ? 'text-white animate-pulse' : 'text-rose-500'} />
+                 <span>Post-Surgery</span>
+                 <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded ${isPostSurgeryActive ? 'bg-rose-700 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                   {formattedPostSurgeryShort}
+                 </span>
+               </button>
+               <button
+                 type="button"
+                 onClick={() => {
+                   setTempPostSurgeryDate(postSurgeryDate);
+                   setIsEditingPostSurgeryDate(!isEditingPostSurgeryDate);
+                 }}
+                 className={`px-2 py-2 rounded-r-lg border border-l transition-all text-xs flex items-center justify-center ${
+                   isPostSurgeryActive
+                     ? 'bg-rose-700 border-rose-500 text-white hover:bg-rose-800'
+                     : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700'
+                 }`}
+                 title="Configure Post-Surgery Date Preset"
+               >
+                 <Pencil size={11} />
+               </button>
+
+               {/* Popover editor */}
+               {isEditingPostSurgeryDate && (
+                 <div className="absolute top-full mt-2 left-0 z-50 bg-white p-4 rounded-xl border border-slate-200 shadow-2xl w-64 animate-in fade-in slide-in-from-top-1 text-slate-900">
+                   <div className="flex items-center justify-between mb-2">
+                     <span className="text-[10px] font-black uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+                       <HeartPulse size={13} className="text-rose-500" />
+                       Recovery Preset Date
+                     </span>
+                     <button 
+                       type="button"
+                       onClick={() => setIsEditingPostSurgeryDate(false)}
+                       className="text-slate-400 hover:text-slate-600 font-bold text-xs"
+                     >
+                       ✕
+                     </button>
+                   </div>
+                   <p className="text-[10px] text-slate-400 mb-2.5 leading-relaxed">
+                     Date preset for your post-surgery recovery. Stored in your browser settings.
+                   </p>
+                   <input 
+                     type="date"
+                     value={tempPostSurgeryDate}
+                     onChange={(e) => setTempPostSurgeryDate(e.target.value)}
+                     className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-800 outline-none mb-3 focus:ring-2 focus:ring-cyan-500/20"
+                   />
+                   <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                     <button
+                       type="button"
+                       onClick={() => {
+                         setTempPostSurgeryDate('2026-09-23');
+                         handleSavePostSurgeryDate('2026-09-23');
+                       }}
+                       className="text-[9px] font-bold text-slate-400 hover:text-slate-600 underline"
+                     >
+                       Reset (Sep 23)
+                     </button>
+                     <button
+                       type="button"
+                       onClick={() => handleSavePostSurgeryDate(tempPostSurgeryDate)}
+                       className="bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg shadow-sm"
+                     >
+                       Save Preset
+                     </button>
+                   </div>
+                 </div>
+               )}
              </div>
-             <div className="flex items-center gap-2 flex-1 lg:flex-none">
-               <input 
-                 type="date" 
-                 value={startDate}
-                 onChange={(e) => setStartDate(e.target.value)}
-                 className="bg-transparent text-[10px] font-bold text-slate-600 outline-none cursor-pointer hover:text-cyan-600 transition-colors"
-               />
-               <span className="text-slate-300">—</span>
-               <input 
-                 type="date" 
-                 value={endDate}
-                 onChange={(e) => setEndDate(e.target.value)}
-                 className="bg-transparent text-[10px] font-bold text-slate-600 outline-none cursor-pointer hover:text-cyan-600 transition-colors"
-               />
-             </div>
-             <button 
-               onClick={() => {
-                 if (data && data.length > 0) {
-                   const dates = data.filter(d => d && d.date).map(d => d.date).sort();
-                   if (dates.length > 0) {
-                     setStartDate(dates[0]);
-                     setEndDate(dates[dates.length - 1]);
+
+             <div className="flex items-center gap-4 bg-slate-50 p-2 rounded-lg border border-slate-200 flex-1 lg:flex-none">
+               <div className="flex items-center gap-2 text-slate-400 px-2 border-r border-slate-200">
+                 <Calendar size={14} />
+                 <span className="text-[9px] font-black uppercase tracking-widest">Date Range</span>
+               </div>
+               <div className="flex items-center gap-2 flex-1 lg:flex-none">
+                 <input 
+                   type="date" 
+                   value={startDate}
+                   onChange={(e) => setStartDate(e.target.value)}
+                   className="bg-transparent text-[10px] font-bold text-slate-600 outline-none cursor-pointer hover:text-cyan-600 transition-colors"
+                 />
+                 <span className="text-slate-300">—</span>
+                 <input 
+                   type="date" 
+                   value={endDate}
+                   onChange={(e) => setEndDate(e.target.value)}
+                   className="bg-transparent text-[10px] font-bold text-slate-600 outline-none cursor-pointer hover:text-cyan-600 transition-colors"
+                 />
+               </div>
+               <button 
+                 onClick={() => {
+                   if (data && data.length > 0) {
+                     const dates = data.filter(d => d && d.date).map(d => d.date).sort();
+                     if (dates.length > 0) {
+                       setStartDate(dates[0]);
+                       setEndDate(dates[dates.length - 1]);
+                     }
                    }
-                 }
-               }}
-               className="p-1.5 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-600 transition-all"
-               title="Reset Date Range"
-             >
-               <RefreshCw size={12} />
-             </button>
+                 }}
+                 className="p-1.5 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-600 transition-all"
+                 title="Reset Date Range"
+               >
+                 <RefreshCw size={12} />
+               </button>
+             </div>
            </div>
         </section>
 
@@ -1248,69 +1428,71 @@ export default function App() {
             </div>
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-            <div className="rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden flex flex-col h-full">
-              <table className="w-full text-left text-[11px] font-bold">
-                <thead className="bg-slate-100 text-slate-500 uppercase tracking-widest border-b border-slate-200">
-                  <tr>
-                    <th className="px-6 py-3">Cycle Protocol</th>
-                    <th className="px-6 py-3 text-center">Start</th>
-                    <th className="px-6 py-3 text-center">End</th>
-                    <th className="px-6 py-3 text-center">Mass Δ</th>
-                    <th className="px-6 py-3 text-center">Load (TSS)</th>
-                    <th className="px-6 py-3 text-right">Duration</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {doseSegments.map((seg, i) => (
-                    <tr key={i} className="hover:bg-cyan-50 transition-colors group">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-black text-cyan-600 bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200/60 font-mono">
-                            #{seg.cycleIndex}
-                          </span>
-                          <span className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight font-black">
-                            {seg.dose} Protocol
-                          </span>
-                        </div>
-                        <div className="text-[9px] text-slate-400 mt-0.5">{seg.startDate} → {seg.endDate}</div>
-                      </td>
-                      <td className="px-6 py-4 text-center text-slate-600 font-mono">
-                        {seg.startWeight ? `${seg.startWeight.toFixed(1)}kg` : '—'}
-                      </td>
-                      <td className="px-6 py-4 text-center text-slate-600 font-mono">
-                        {seg.endWeight ? `${seg.endWeight.toFixed(1)}kg` : '—'}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-1 rounded inline-flex items-center gap-1 font-mono text-[10px] ${
-                          seg.weightLoss > 0 
-                            ? 'bg-emerald-100 text-emerald-800 font-bold' 
-                            : seg.weightLoss < 0 
-                            ? 'bg-rose-100 text-rose-800 font-bold' 
-                            : 'bg-slate-100 text-slate-500'
-                        }`}>
-                          {seg.weightLoss > 0 
-                            ? `-${seg.weightLoss.toFixed(1)}kg` 
-                            : seg.weightLoss < 0 
-                            ? `+${Math.abs(seg.weightLoss).toFixed(1)}kg` 
-                            : 'STABLE'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-center text-amber-600 font-mono">{seg.totalTss}</td>
-                      <td className="px-6 py-4 text-right text-slate-500 uppercase text-[9px]">{seg.days}d</td>
-                    </tr>
-                  ))}
-                  {doseSegments.length === 0 && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden flex flex-col h-[300px]">
+              <div className="overflow-auto flex-1 relative">
+                <table className="w-full text-left text-[11px] font-bold min-w-[550px] border-collapse">
+                  <thead className="text-slate-500 uppercase tracking-widest border-b border-slate-200 sticky top-0 z-10">
                     <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium text-xs">
-                        No medication cycles recorded in this date range.
-                      </td>
+                      <th className="px-6 py-3 bg-slate-100">Cycle Protocol</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Start</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">End</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Mass Δ</th>
+                      <th className="px-6 py-3 text-center bg-slate-100">Load (TSS)</th>
+                      <th className="px-6 py-3 text-right bg-slate-100">Duration</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white/50">
+                    {doseSegments.map((seg, i) => (
+                      <tr key={i} className="hover:bg-cyan-50/85 transition-colors group">
+                        <td className="px-6 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-black text-cyan-600 bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200/60 font-mono">
+                              #{seg.cycleIndex}
+                            </span>
+                            <span className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight font-black">
+                              {seg.dose} Protocol
+                            </span>
+                          </div>
+                          <div className="text-[9px] text-slate-400 mt-0.5">{seg.startDate} → {seg.endDate}</div>
+                        </td>
+                        <td className="px-6 py-2.5 text-center text-slate-600 font-mono">
+                          {seg.startWeight ? `${seg.startWeight.toFixed(1)}kg` : '—'}
+                        </td>
+                        <td className="px-6 py-2.5 text-center text-slate-600 font-mono">
+                          {seg.endWeight ? `${seg.endWeight.toFixed(1)}kg` : '—'}
+                        </td>
+                        <td className="px-6 py-2.5 text-center">
+                          <span className={`px-2 py-1 rounded inline-flex items-center gap-1 font-mono text-[10px] ${
+                            seg.weightLoss > 0 
+                              ? 'bg-emerald-100 text-emerald-800 font-bold' 
+                              : seg.weightLoss < 0 
+                              ? 'bg-rose-100 text-rose-800 font-bold' 
+                              : 'bg-slate-100 text-slate-500'
+                          }`}>
+                            {seg.weightLoss > 0 
+                              ? `-${seg.weightLoss.toFixed(1)}kg` 
+                              : seg.weightLoss < 0 
+                              ? `+${Math.abs(seg.weightLoss).toFixed(1)}kg` 
+                              : 'STABLE'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-2.5 text-center text-amber-600 font-mono">{seg.totalTss}</td>
+                        <td className="px-6 py-2.5 text-right text-slate-500 uppercase text-[9px]">{seg.days}d</td>
+                      </tr>
+                    ))}
+                    {doseSegments.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium text-xs">
+                          No medication cycles recorded in this date range.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div className="bg-slate-50/50 rounded-xl p-6 border border-slate-200 flex flex-col h-full min-h-[440px]">
-              <div className="mb-4">
+            <div className="bg-slate-50/50 rounded-xl p-5 border border-slate-200 flex flex-col h-[300px]">
+              <div className="mb-2">
                 <h4 className="text-center text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Correlation Analysis: Mass Reduction vs Mechanical Work (TSS)</h4>
               </div>
               <div className="flex-1 min-h-0">
@@ -1320,15 +1502,15 @@ export default function App() {
                   </div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={doseSegments} margin={{ top: 10, right: 15, bottom: 35, left: 10 }}>
+                    <ComposedChart data={doseSegments} margin={{ top: 5, right: 15, bottom: 20, left: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                       <XAxis 
                         dataKey="chartLabel" 
                         axisLine={false} 
                         tickLine={false} 
-                        angle={-30} 
+                        angle={-25} 
                         textAnchor="end" 
-                        height={55}
+                        height={45}
                         tick={{ fontSize: 9, fontWeight: 800, fill: '#64748b' }} 
                         interval={0}
                       />
@@ -1528,13 +1710,44 @@ export default function App() {
                 <div className={`max-w-[85%] sm:max-w-[75%] p-5 sm:p-6 rounded-2xl ${
                   msg.role === 'user' 
                     ? 'bg-cyan-600 text-white rounded-tr-none shadow-md text-sm font-medium leading-relaxed font-sans tracking-tight' 
-                    : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'
+                    : msg.isError
+                      ? 'bg-amber-50/90 border border-amber-200 text-amber-950 rounded-tl-none shadow-sm'
+                      : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'
                 }`}>
-                  <div className="text-sm font-normal leading-relaxed font-sans text-slate-700">
+                  <div className="text-sm font-normal leading-relaxed font-sans">
                     {msg.role === 'user' ? (
                       msg.text.split('\n').map((line, idx) => (
                         <p key={idx} className={idx > 0 ? 'mt-2' : ''}>{line}</p>
                       ))
+                    ) : msg.isError ? (
+                      <div>
+                        <div className="flex items-start gap-3 mb-3">
+                          <div className="p-1.5 bg-amber-100 rounded-lg text-amber-800 shrink-0 mt-0.5">
+                            <Info size={16} />
+                          </div>
+                          <div>
+                            <p className="font-bold text-xs uppercase tracking-wider text-amber-900 mb-1">Service Notice</p>
+                            <p className="text-amber-900 text-xs sm:text-sm leading-relaxed">{msg.text}</p>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-amber-200/60 mt-3">
+                          <button
+                            onClick={handleRetryLastPrompt}
+                            disabled={isLoading}
+                            className="px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white text-[11px] font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
+                          >
+                            <RefreshCw size={12} className={isLoading ? 'animate-spin' : ''} />
+                            Retry Prompt
+                          </button>
+                          <button
+                            onClick={() => setIsSettingsOpen(true)}
+                            className="px-3 py-1.5 bg-white hover:bg-amber-100/50 text-amber-900 border border-amber-300 text-[11px] font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-1.5"
+                          >
+                            <Settings size={12} />
+                            API Settings
+                          </button>
+                        </div>
+                      </div>
                     ) : (
                       <div className="markdown-body">
                         <ReactMarkdown
@@ -1608,6 +1821,19 @@ export default function App() {
                 />
                 <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
                   Provide your Gemini API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">Google AI Studio</a>, or configure <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">GEMINI_API_KEY</code> in Settings &gt; Secrets.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100">
+                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Post-Surgery Recovery Date</label>
+                <input 
+                  type="date" 
+                  value={postSurgeryDate}
+                  onChange={(e) => handleSavePostSurgeryDate(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-rose-500/20 outline-none transition-all"
+                />
+                <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed">
+                  Preset starting date for focusing on post-surgery recovery. Used by the &quot;Post-Surgery&quot; toggle button.
                 </p>
               </div>
             </div>

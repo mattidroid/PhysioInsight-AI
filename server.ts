@@ -39,6 +39,164 @@ Objective: Provide data-driven insights. If you see a dip in HRV after a big VO2
 Formatting: Use Markdown. Be concise but scientifically rigorous.
 `;
 
+// Valid models ordered by capability and fallback resilience
+const MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  contents: any,
+  systemInstruction: string
+): Promise<string> {
+  let lastError: any = null;
+
+  for (const model of MODELS_TO_TRY) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+          },
+        });
+        if (response.text) {
+          return response.text;
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errorText = `${err?.message || ''} ${err?.status || ''}`;
+        const isTransient =
+          err?.status === 503 ||
+          err?.status === 429 ||
+          err?.status === 500 ||
+          errorText.includes('high demand') ||
+          errorText.includes('UNAVAILABLE') ||
+          errorText.includes('RESOURCE_EXHAUSTED');
+
+        if (!isTransient) {
+          // Non-transient errors (such as 401 or invalid params) should not be retried
+          throw err;
+        }
+
+        // Wait with backoff before next attempt or next model
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 800));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function streamWithFallback(
+  ai: GoogleGenAI,
+  contents: any,
+  systemInstruction: string
+) {
+  let lastError: any = null;
+
+  for (const model of MODELS_TO_TRY) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const stream = await ai.models.generateContentStream({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+          },
+        });
+        return stream;
+      } catch (err: any) {
+        lastError = err;
+        const errorText = `${err?.message || ''} ${err?.status || ''}`;
+        const isTransient =
+          err?.status === 503 ||
+          err?.status === 429 ||
+          err?.status === 500 ||
+          errorText.includes('high demand') ||
+          errorText.includes('UNAVAILABLE') ||
+          errorText.includes('RESOURCE_EXHAUSTED');
+
+        if (!isTransient) {
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 800));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+function parseErrorMessage(err: any): { userMessage: string; statusCode: number } {
+  let rawMsg = '';
+  if (typeof err === 'string') {
+    rawMsg = err;
+  } else if (err?.message) {
+    rawMsg = typeof err.message === 'string' ? err.message : JSON.stringify(err.message);
+  } else if (err?.error?.message) {
+    rawMsg = typeof err.error.message === 'string' ? err.error.message : JSON.stringify(err.error.message);
+  } else {
+    try {
+      rawMsg = JSON.stringify(err);
+    } catch {
+      rawMsg = String(err);
+    }
+  }
+
+  // Extract clean inner message if raw stringified Google API JSON error
+  if (rawMsg.includes('{"error"') || (rawMsg.startsWith('{') && rawMsg.includes('"message"'))) {
+    try {
+      const jsonStart = rawMsg.indexOf('{');
+      const jsonEnd = rawMsg.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd > jsonStart) {
+        const parsed = JSON.parse(rawMsg.slice(jsonStart, jsonEnd + 1));
+        if (parsed?.error?.message) {
+          rawMsg = parsed.error.message;
+        } else if (parsed?.message) {
+          rawMsg = parsed.message;
+        }
+      }
+    } catch {
+      // keep rawMsg as is
+    }
+  }
+
+  const lower = rawMsg.toLowerCase();
+  const isHighDemand =
+    err?.status === 503 ||
+    err?.status === 429 ||
+    lower.includes('high demand') ||
+    lower.includes('unavailable') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('503') ||
+    lower.includes('429');
+
+  const isAuthError =
+    err?.status === 401 ||
+    lower.includes('api key') ||
+    lower.includes('unauthenticated') ||
+    lower.includes('access_token_type_unsupported');
+
+  if (isHighDemand) {
+    return {
+      statusCode: 503,
+      userMessage: 'The AI service is experiencing temporary high demand on Google servers. We automatically retried with fallback models, but traffic remains elevated. Please wait a moment and try your request again.',
+    };
+  }
+
+  if (isAuthError) {
+    return {
+      statusCode: 401,
+      userMessage: 'Gemini API key is invalid or unauthorized. Please verify your API key in Settings or in the Settings > Secrets panel.',
+    };
+  }
+
+  return {
+    statusCode: err?.status || 500,
+    userMessage: rawMsg || 'Error generating insights from Gemini.',
+  };
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
@@ -67,26 +225,17 @@ async function startServer() {
       }
 
       const dataPayload = Array.isArray(data) ? data.slice(-180) : [];
+      const contents = [
+        { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
+        { text: prompt },
+      ];
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [
-          { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
-          { text: prompt },
-        ],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-        },
-      });
-
-      res.json({ text: response.text || '' });
+      const text = await generateWithFallback(ai, contents, SYSTEM_INSTRUCTION);
+      res.json({ text });
     } catch (err: any) {
       console.error('Gemini analyze error:', err);
-      const isAuthError = err?.status === 401 || err?.message?.includes('API key') || err?.message?.includes('UNAUTHENTICATED') || err?.message?.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED');
-      const userMessage = isAuthError
-        ? 'Gemini API key is invalid or unauthorized. Please verify your API key in Settings or in the Settings > Secrets panel.'
-        : (err?.message || 'Error generating insights from Gemini.');
-      res.status(isAuthError ? 401 : 500).json({ error: userMessage });
+      const { statusCode, userMessage } = parseErrorMessage(err);
+      res.status(statusCode).json({ error: userMessage });
     }
   });
 
@@ -113,17 +262,12 @@ async function startServer() {
       res.setHeader('Connection', 'keep-alive');
 
       const dataPayload = Array.isArray(data) ? data.slice(-180) : [];
+      const contents = [
+        { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
+        { text: prompt },
+      ];
 
-      const stream = await ai.models.generateContentStream({
-        model: 'gemini-3.8-flash',
-        contents: [
-          { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
-          { text: prompt },
-        ],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-        },
-      });
+      const stream = await streamWithFallback(ai, contents, SYSTEM_INSTRUCTION);
 
       for await (const chunk of stream) {
         if (chunk.text) {
@@ -134,18 +278,29 @@ async function startServer() {
       res.end();
     } catch (err: any) {
       console.error('Gemini stream error:', err);
-      const isAuthError = err?.status === 401 || err?.message?.includes('API key') || err?.message?.includes('UNAUTHENTICATED') || err?.message?.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED');
-      const userMessage = isAuthError
-        ? 'Gemini API key is invalid or unauthorized. Please verify your API key in Settings or in the Settings > Secrets panel.'
-        : (err?.message || 'Streaming failed.');
+      const { statusCode, userMessage } = parseErrorMessage(err);
 
       if (!res.headersSent) {
-        res.status(isAuthError ? 401 : 500).json({ error: userMessage });
+        res.status(statusCode).json({ error: userMessage });
       } else {
         res.write(`data: ${JSON.stringify({ error: userMessage })}\n\n`);
         res.end();
       }
     }
+  });
+
+  // Explicit fallback for API routes: guarantees all /api requests return JSON, never HTML
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API route not found' });
+  });
+
+  // Express error handler: ensures error responses on API calls are always JSON
+  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) {
+      return next(err);
+    }
+    console.error('Express server error:', err);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
   });
 
   if (!isProduction) {
@@ -157,7 +312,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
+    app.use((_req, res) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
