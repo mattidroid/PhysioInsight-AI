@@ -95,7 +95,7 @@ export class GeminiService {
   /**
    * Analyzes physiological and training data via the server-side Gemini API route.
    */
-  async analyzeData(data: DaySummary[], userPrompt: string): Promise<string> {
+  async analyzeData(data: DaySummary[], userPrompt: string, substances?: Record<string, string>): Promise<string> {
     const customKey = typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') : null;
 
     const headers: Record<string, string> = {
@@ -108,6 +108,7 @@ export class GeminiService {
     const payload = {
       data: slimData(data),
       prompt: userPrompt,
+      substances: substances && Object.keys(substances).length > 0 ? substances : undefined,
       apiKey: customKey ? customKey.trim() : undefined,
     };
 
@@ -156,7 +157,7 @@ export class GeminiService {
   /**
    * Streams physiological analysis from the server-side Gemini streaming route.
    */
-  async *streamAnalysis(data: DaySummary[], userPrompt: string): AsyncGenerator<string, void, unknown> {
+  async *streamAnalysis(data: DaySummary[], userPrompt: string, substances?: Record<string, string>): AsyncGenerator<string, void, unknown> {
     const customKey = typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') : null;
 
     const headers: Record<string, string> = {
@@ -169,6 +170,7 @@ export class GeminiService {
     const payload = {
       data: slimData(data),
       prompt: userPrompt,
+      substances: substances && Object.keys(substances).length > 0 ? substances : undefined,
       apiKey: customKey ? customKey.trim() : undefined,
     };
 

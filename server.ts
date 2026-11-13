@@ -7,7 +7,39 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const isProduction = process.env.NODE_ENV === 'production';
-const PORT = parseInt(process.env.PORT || '3000', 10);
+
+function getCliArg(flag: string): string | undefined {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && args[i + 1]) {
+      return args[i + 1];
+    }
+    if (args[i].startsWith(`${flag}=`)) {
+      return args[i].slice(flag.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function resolvePort(): number {
+  const cliPort = getCliArg('--port');
+  if (cliPort) {
+    const parsed = parseInt(cliPort, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  const envPort = process.env.PORT;
+  const nginxPort = process.env.NGINX_PORT;
+  // In development behind nginx, Cloud Run's default PORT (e.g. 8080) may be bound by nginx.
+  if (!isProduction && envPort && nginxPort && envPort === nginxPort) {
+    return parseInt(process.env.DEFAULT_APP_PORT || '3000', 10);
+  }
+
+  return parseInt(envPort || process.env.DEFAULT_APP_PORT || '3000', 10);
+}
+
+const PORT = resolvePort();
+const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
 
 function getGeminiClient(customApiKey?: string): GoogleGenAI | null {
   const apiKey = customApiKey || process.env.GEMINI_API_KEY || process.env.API_KEY;
@@ -31,7 +63,7 @@ You are analyzing a user's combined Health Metrics and Workout Data (TSS - Train
 Key contexts to correlate:
 1. Training Load (TSS): How do high TSS days or high-intensity bike sessions affect next-day HRV?
 2. Weight Training: Analyze the impact of Strength sessions on weight loss plateaus and recovery.
-3. Medication & Travel: How do Mounjaro dose changes (5mg-15mg) interact with perceived training exertion and recovery?
+3. Medication & Travel: How do medication protocols and dose changes (e.g., Mounjaro/MJ, Retatrutide/RT, Tesamorelin/TE, or combinations noted in the substance abbreviation legend) interact with perceived training exertion, weight trends, and recovery?
 4. Metabolic Health: Correlate weight loss with Intensity Factor (IF) or TSS efficiency.
 
 Objective: Provide data-driven insights. If you see a dip in HRV after a big VO2Max session, point it out. If Strength training correlates with faster weight drops, highlight it.
@@ -209,7 +241,7 @@ async function startServer() {
   // Server-side Gemini analysis endpoint
   app.post('/api/gemini/analyze', async (req, res) => {
     try {
-      const { data, prompt, apiKey: bodyApiKey } = req.body;
+      const { data, prompt, substances, apiKey: bodyApiKey } = req.body;
       const headerApiKey = req.headers['x-gemini-api-key'] as string | undefined;
       const clientApiKey = headerApiKey || bodyApiKey;
 
@@ -225,10 +257,13 @@ async function startServer() {
       }
 
       const dataPayload = Array.isArray(data) ? data.slice(-180) : [];
-      const contents = [
+      const contents: Array<{ text: string }> = [
         { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
-        { text: prompt },
       ];
+      if (substances && typeof substances === 'object' && Object.keys(substances).length > 0) {
+        contents.push({ text: `Medication / Substance Abbreviation Legend: ${JSON.stringify(substances)}` });
+      }
+      contents.push({ text: prompt });
 
       const text = await generateWithFallback(ai, contents, SYSTEM_INSTRUCTION);
       res.json({ text });
@@ -242,7 +277,7 @@ async function startServer() {
   // Server-side Gemini streaming endpoint
   app.post('/api/gemini/stream', async (req, res) => {
     try {
-      const { data, prompt, apiKey: bodyApiKey } = req.body;
+      const { data, prompt, substances, apiKey: bodyApiKey } = req.body;
       const headerApiKey = req.headers['x-gemini-api-key'] as string | undefined;
       const clientApiKey = headerApiKey || bodyApiKey;
 
@@ -262,10 +297,13 @@ async function startServer() {
       res.setHeader('Connection', 'keep-alive');
 
       const dataPayload = Array.isArray(data) ? data.slice(-180) : [];
-      const contents = [
+      const contents: Array<{ text: string }> = [
         { text: `Dataset Overview: ${JSON.stringify(dataPayload)}` },
-        { text: prompt },
       ];
+      if (substances && typeof substances === 'object' && Object.keys(substances).length > 0) {
+        contents.push({ text: `Medication / Substance Abbreviation Legend: ${JSON.stringify(substances)}` });
+      }
+      contents.push({ text: prompt });
 
       const stream = await streamWithFallback(ai, contents, SYSTEM_INSTRUCTION);
 
@@ -306,7 +344,10 @@ async function startServer() {
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -317,8 +358,13 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running at http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'development'})`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server running at http://${HOST}:${PORT} (${isProduction ? 'production' : 'development'})`);
+  });
+
+  server.on('error', (err) => {
+    console.error('Server listen error:', err);
+    process.exit(1);
   });
 }
 

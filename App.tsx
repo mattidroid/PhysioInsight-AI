@@ -8,10 +8,17 @@ import {
 import { 
   Activity, Moon, Scale, Zap, TrendingDown, MessageSquare, Sparkles,
   Heart, Upload, FileText, RefreshCw, Dumbbell, Bike, Plus, Pill, Calendar, Clock, Filter, 
-  Target, BarChart3, Info, Waves, Mountain, Printer, Maximize2, MoveVertical, Settings, Key, HeartPulse, Pencil
+  Target, BarChart3, Info, Waves, Mountain, Printer, Maximize2, MoveVertical, Settings, Key, HeartPulse, Pencil,
+  BookOpen, Check, Trash2
 } from 'lucide-react';
 import { DaySummary } from './types';
-import { parseTrainingPeaksCSV } from './services/dataParser';
+import {
+  parseTrainingPeaksCSV,
+  SubstanceMap,
+  isSubstanceCSV,
+  parseSubstancesCSV,
+  resolveSubstanceFromNotes
+} from './services/dataParser';
 import { geminiService, cleanGeminiErrorMessage } from './services/geminiService';
 import { StatCard } from './components/StatCard';
 import ReactMarkdown from 'react-markdown';
@@ -19,6 +26,8 @@ import ReactMarkdown from 'react-markdown';
 interface DoseSegment {
   cycleIndex: number;
   dose: string;
+  substanceShort?: string;
+  substanceName?: string;
   chartLabel: string;
   startDate: string;
   endDate: string;
@@ -44,6 +53,18 @@ export default function App() {
   const [totalChartHeight, setTotalChartHeight] = useState(850);
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [substanceMap, setSubstanceMap] = useState<SubstanceMap>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('PHYSIO_SUBSTANCE_MAP');
+        if (saved) return JSON.parse(saved);
+      } catch {
+        // ignore malformed storage
+      }
+    }
+    return {};
+  });
+  const [substanceNotice, setSubstanceNotice] = useState<string | null>(null);
   const [postSurgeryDate, setPostSurgeryDate] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('POST_SURGERY_DATE') || '2026-09-23';
@@ -103,7 +124,29 @@ export default function App() {
     }
     setIsEditingPostSurgeryDate(false);
   };
-  const [targetWeight, setTargetWeight] = useState<number | null>(null);
+  const [targetWeight, setTargetWeight] = useState<number | null>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('TARGET_WEIGHT');
+      if (saved) {
+        const parsed = parseFloat(saved);
+        return !isNaN(parsed) && parsed > 0 ? parsed : null;
+      }
+    }
+    return null;
+  });
+
+  const handleSaveTargetWeight = (newWeight: number | null) => {
+    const valid = newWeight !== null && !isNaN(newWeight) && newWeight > 0 ? newWeight : null;
+    setTargetWeight(valid);
+    if (typeof window !== 'undefined') {
+      if (valid !== null) {
+        localStorage.setItem('TARGET_WEIGHT', String(valid));
+      } else {
+        localStorage.removeItem('TARGET_WEIGHT');
+      }
+    }
+  };
+
   const [projectionDays, setProjectionDays] = useState<number>(30);
   const [showProjection, setShowProjection] = useState(false);
   const [showTss, setShowTss] = useState(true);
@@ -111,6 +154,7 @@ export default function App() {
   
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const substanceFileInputRef = useRef<HTMLInputElement>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const isResizingSplit = useRef(false);
   const isResizingTotal = useRef(false);
@@ -297,6 +341,7 @@ export default function App() {
         let val = doseMatch[1].replace(/mg\//i, '/');
         doseValue = `${val}mg`;
       }
+      const { shortCode: substanceShort, fullName: substanceName } = resolveSubstanceFromNotes(startDay.notes, substanceMap);
 
       let startWeight = workoutFilteredData[startIdx].weight || null;
       if (startWeight === null) {
@@ -344,11 +389,14 @@ export default function App() {
         : startDate;
 
       const cycleIndex = i + 1;
-      const chartLabel = `#${cycleIndex} · ${doseValue} (${shortDate})`;
+      const shortPrefix = substanceShort ? `${substanceShort} ` : '';
+      const chartLabel = `#${cycleIndex} · ${shortPrefix}${doseValue} (${shortDate})`;
 
       segments.push({
         cycleIndex,
         dose: doseValue,
+        substanceShort,
+        substanceName,
         chartLabel,
         startDate,
         endDate,
@@ -360,7 +408,7 @@ export default function App() {
       });
     }
     return segments;
-  }, [workoutFilteredData]);
+  }, [workoutFilteredData, substanceMap]);
 
   const doseSegments = useMemo(() => {
     if (allDoseSegments.length === 0) return [];
@@ -744,11 +792,36 @@ export default function App() {
     }
   };
 
+  const persistSubstanceMap = (nextMap: SubstanceMap) => {
+    setSubstanceMap(nextMap);
+    if (typeof window !== 'undefined') {
+      if (Object.keys(nextMap).length > 0) {
+        localStorage.setItem('PHYSIO_SUBSTANCE_MAP', JSON.stringify(nextMap));
+      } else {
+        localStorage.removeItem('PHYSIO_SUBSTANCE_MAP');
+      }
+    }
+  };
+
   const processFile = (file: File) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
-      setData(prev => parseTrainingPeaksCSV(text, prev));
+      if (!text) return;
+      if (isSubstanceCSV(text)) {
+        setSubstanceMap(prev => {
+          const updated = parseSubstancesCSV(text, prev);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('PHYSIO_SUBSTANCE_MAP', JSON.stringify(updated));
+          }
+          const count = Object.keys(updated).length;
+          setSubstanceNotice(`Loaded ${count} substance abbreviation${count === 1 ? '' : 's'} from ${file.name}`);
+          setTimeout(() => setSubstanceNotice(null), 6000);
+          return updated;
+        });
+      } else {
+        setData(prev => parseTrainingPeaksCSV(text, prev));
+      }
     };
     reader.readAsText(file);
   };
@@ -756,6 +829,7 @@ export default function App() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files) Array.from(files).forEach(processFile);
+    e.target.value = '';
   };
 
   const onDrop = (e: React.DragEvent) => {
@@ -775,7 +849,7 @@ export default function App() {
     try {
       let response: string;
       try {
-        response = await geminiService.analyzeData(filteredData, promptText);
+        response = await geminiService.analyzeData(filteredData, promptText, substanceMap);
       } catch (firstErr: any) {
         const firstErrMsg = cleanGeminiErrorMessage(firstErr);
         // If transient high demand, warmup, or reconnection error, wait 2s and retry once automatically
@@ -790,7 +864,7 @@ export default function App() {
           firstErrMsg.toLowerCase().includes('504')
         ) {
           await new Promise((r) => setTimeout(r, 2000));
-          response = await geminiService.analyzeData(filteredData, promptText);
+          response = await geminiService.analyzeData(filteredData, promptText, substanceMap);
         } else {
           throw firstErr;
         }
@@ -841,32 +915,202 @@ export default function App() {
     window.print();
   };
 
+  const settingsModal = isSettingsOpen && (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm settings-modal">
+      <div className="bg-white w-full max-w-md max-h-[90vh] rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-cyan-50 text-cyan-600 rounded-lg">
+              <Settings size={20} />
+            </div>
+            <h3 className="font-black uppercase tracking-tighter">Configuration &amp; Settings</h3>
+          </div>
+          <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-slate-600">
+            <Plus size={20} className="rotate-45" />
+          </button>
+        </div>
+        <div className="p-6 space-y-4 overflow-y-auto flex-1">
+          <div>
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Gemini API Key</label>
+            <input 
+              type="password" 
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              placeholder="Enter your Gemini API key (AIzaSy...)"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all font-mono"
+            />
+            <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
+              Provide your Gemini API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">Google AI Studio</a>, or configure <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">GEMINI_API_KEY</code> in Settings &gt; Secrets.
+            </p>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100">
+            <div className="flex items-center justify-between mb-2">
+              <label className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                <Target size={12} className="text-cyan-600" />
+                Target Weight (kg)
+              </label>
+              {targetWeight !== null && (
+                <button
+                  type="button"
+                  onClick={() => handleSaveTargetWeight(null)}
+                  className="text-[10px] font-black uppercase tracking-wider text-slate-400 hover:text-rose-600 transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="relative">
+              <input 
+                type="number" 
+                step="0.1"
+                min="0"
+                value={targetWeight ?? ''} 
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  handleSaveTargetWeight(isNaN(val) ? null : val);
+                }}
+                placeholder="e.g. 75.0"
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 pr-10 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all"
+              />
+              <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[10px] font-black text-slate-400 uppercase">kg</span>
+            </div>
+            <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed">
+              Saved persistently in your browser and used for the Weight Trend Projection curve and target ETA.
+            </p>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100">
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Post-Surgery Recovery Date</label>
+            <input 
+              type="date" 
+              value={postSurgeryDate}
+              onChange={(e) => handleSavePostSurgeryDate(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-rose-500/20 outline-none transition-all"
+            />
+            <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed">
+              Preset starting date for focusing on post-surgery recovery. Used by the &quot;Post-Surgery&quot; toggle button.
+            </p>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100">
+            <div className="flex items-center justify-between mb-2">
+              <label className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                <BookOpen size={12} className="text-cyan-600" />
+                Substance Abbreviations ({Object.keys(substanceMap).length})
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  ref={substanceFileInputRef}
+                  onChange={handleFileUpload}
+                  accept=".csv"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => substanceFileInputRef.current?.click()}
+                  className="text-[10px] font-black uppercase tracking-wider text-cyan-600 hover:text-cyan-500 bg-cyan-50 px-2.5 py-1 rounded border border-cyan-200/70 transition-all"
+                >
+                  Upload CSV
+                </button>
+                {Object.keys(substanceMap).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => persistSubstanceMap({})}
+                    title="Clear substance dictionary"
+                    className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            </div>
+            {Object.keys(substanceMap).length > 0 ? (
+              <div className="max-h-32 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 divide-y divide-slate-200/70">
+                {Object.entries(substanceMap).map(([short, full]) => (
+                  <div key={short} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                    <span className="font-mono font-black text-cyan-700">{short}</span>
+                    <span className="font-semibold text-slate-700">{full}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[10px] text-slate-400 leading-relaxed bg-slate-50 border border-slate-200/70 rounded-lg px-3 py-2">
+                Upload a CSV with <code className="bg-white px-1 rounded border border-slate-200 text-slate-600">&quot;Short&quot;,&quot;Full&quot;</code> columns (e.g. <code className="bg-white px-1 rounded border border-slate-200 text-slate-600">MJ, Mounjaro</code>) here or via Add Datasets.
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-3 shrink-0">
+          <button 
+            onClick={() => setIsSettingsOpen(false)}
+            className="flex-1 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={handleSaveApiKey}
+            className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-md transition-all"
+          >
+            Save Configuration
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (data.length === 0) {
+    const substanceCount = Object.keys(substanceMap).length;
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 text-slate-900"
            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
            onDragLeave={() => setIsDragging(false)}
            onDrop={onDrop}>
-        <div className={`max-w-2xl w-full bg-white p-12 rounded-3xl shadow-xl border transition-all ${isDragging ? 'border-cyan-500 bg-slate-50 scale-105' : 'border-slate-200'}`}>
+        <div className={`relative max-w-2xl w-full bg-white p-12 rounded-3xl shadow-xl border transition-all ${isDragging ? 'border-cyan-500 bg-slate-50 scale-105' : 'border-slate-200'}`}>
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            className="absolute top-6 right-6 p-2.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-700 transition-all"
+            title="Settings"
+          >
+            <Settings size={18} />
+          </button>
           <div className="text-center">
             <div className="bg-gradient-to-br from-cyan-600 to-blue-700 w-24 h-24 rounded-3xl flex items-center justify-center text-white mx-auto mb-8 shadow-xl">
               <Upload size={48} />
             </div>
             <h1 className="text-4xl font-black mb-3 tracking-tighter uppercase">PhysioInsight <span className="text-cyan-600">Elite</span></h1>
-            <p className="text-slate-500 text-lg mb-10 max-w-md mx-auto font-medium">Precision physiological analysis for elite performance.</p>
+            <p className="text-slate-500 text-lg mb-3 max-w-md mx-auto font-medium">Precision physiological analysis for elite performance.</p>
+            <p className="text-slate-400 text-xs mb-8 max-w-md mx-auto font-medium">
+              Drop or select metrics, workouts, and optional substance abbreviation (<code className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">Short, Full</code>) CSV files.
+            </p>
             <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" multiple className="hidden" />
             <button onClick={() => fileInputRef.current?.click()} className="bg-cyan-600 hover:bg-cyan-500 text-white font-black py-5 px-12 rounded-xl transition-all shadow-lg active:scale-95 flex items-center gap-4 mx-auto uppercase tracking-wider text-sm">
               <FileText size={20} />
               Import Performance Data
             </button>
+            {substanceCount > 0 && (
+              <div className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold">
+                <Check size={14} className="text-emerald-600 shrink-0" />
+                <span>
+                  {substanceCount} Substance Abbreviation{substanceCount === 1 ? '' : 's'} Ready ({Object.keys(substanceMap).join(', ')})
+                </span>
+              </div>
+            )}
           </div>
         </div>
+        {settingsModal}
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen pb-40 bg-slate-50 text-slate-900 font-sans">
+    <div
+      className="min-h-screen pb-40 bg-slate-50 text-slate-900 font-sans"
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={onDrop}
+    >
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b border-slate-200 px-10 py-4 flex items-center justify-between">
         <div className="flex items-center gap-5">
           <div className="bg-cyan-600 p-2.5 rounded-xl text-white shadow-lg">
@@ -905,6 +1149,17 @@ export default function App() {
       </header>
 
       <main className="max-w-[1600px] mx-auto px-10 pt-10 space-y-8">
+        {substanceNotice && (
+          <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 px-5 py-3 rounded-xl flex items-center justify-between text-xs font-bold shadow-sm">
+            <div className="flex items-center gap-2.5">
+              <Check size={16} className="text-emerald-600 shrink-0" />
+              <span>{substanceNotice}</span>
+            </div>
+            <button onClick={() => setSubstanceNotice(null)} className="text-emerald-700 hover:text-emerald-950">
+              <Plus size={16} className="rotate-45" />
+            </button>
+          </div>
+        )}
         {/* Performance Filters */}
         <section className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
            <div className="flex items-center gap-4 overflow-x-auto no-scrollbar scroll-smooth w-full lg:w-auto">
@@ -1080,8 +1335,13 @@ export default function App() {
                      <div className="relative">
                        <input 
                          type="number" 
-                         value={targetWeight || ''} 
-                         onChange={(e) => setTargetWeight(parseFloat(e.target.value) || null)}
+                         step="0.1"
+                         min="0"
+                         value={targetWeight ?? ''} 
+                         onChange={(e) => {
+                           const val = parseFloat(e.target.value);
+                           handleSaveTargetWeight(isNaN(val) ? null : val);
+                         }}
                          placeholder="0.0"
                          className="w-20 bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-black outline-none focus:border-cyan-500 transition-all"
                        />
@@ -1281,13 +1541,13 @@ export default function App() {
                         } as any)}
                       >
                         <Label 
-                          value={seg.dose} 
+                          value={seg.substanceName ? `${seg.substanceName} · ${seg.dose}` : seg.substanceShort ? `${seg.substanceShort} ${seg.dose}` : seg.dose} 
                           position="insideTopLeft" 
                           fontSize={8} 
                           fontWeight="900" 
                           fill="#0891b2" 
                           offset={5}
-                          className="uppercase tracking-tighter opacity-50"
+                          className="uppercase tracking-tighter opacity-60"
                         />
                       </ReferenceArea>
                     </React.Fragment>
@@ -1381,13 +1641,13 @@ export default function App() {
                         } as any)}
                       >
                         <Label 
-                          value={seg.dose} 
+                          value={seg.substanceName ? `${seg.substanceName} · ${seg.dose}` : seg.substanceShort ? `${seg.substanceShort} ${seg.dose}` : seg.dose} 
                           position="insideTopLeft" 
                           fontSize={8} 
                           fontWeight="900" 
                           fill="#f43f5e" 
                           offset={5}
-                          className="uppercase tracking-tighter opacity-40"
+                          className="uppercase tracking-tighter opacity-50"
                         />
                       </ReferenceArea>
                     </React.Fragment>
@@ -1445,13 +1705,18 @@ export default function App() {
                     {doseSegments.map((seg, i) => (
                       <tr key={i} className="hover:bg-cyan-50/85 transition-colors group">
                         <td className="px-6 py-2.5">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-[10px] font-black text-cyan-600 bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200/60 font-mono">
                               #{seg.cycleIndex}
                             </span>
                             <span className="text-slate-900 group-hover:text-cyan-600 transition-colors uppercase tracking-tight font-black">
-                              {seg.dose} Protocol
+                              {seg.substanceName ? `${seg.substanceName} · ` : seg.substanceShort ? `${seg.substanceShort} · ` : ''}{seg.dose} Protocol
                             </span>
+                            {seg.substanceName && seg.substanceShort && (
+                              <span className="text-[9px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-wider font-mono">
+                                {seg.substanceShort}
+                              </span>
+                            )}
                           </div>
                           <div className="text-[9px] text-slate-400 mt-0.5">{seg.startDate} → {seg.endDate}</div>
                         </td>
@@ -1522,7 +1787,8 @@ export default function App() {
                         labelFormatter={(_label, payload) => {
                           const item = payload?.[0]?.payload as DoseSegment | undefined;
                           if (!item) return _label;
-                          return `Cycle #${item.cycleIndex}: ${item.dose} Protocol (${item.startDate} → ${item.endDate})`;
+                          const medName = item.substanceName ? `${item.substanceName} · ` : item.substanceShort ? `${item.substanceShort} · ` : '';
+                          return `Cycle #${item.cycleIndex}: ${medName}${item.dose} Protocol (${item.startDate} → ${item.endDate})`;
                         }}
                         formatter={(value: any, name: string, item: any) => {
                           const seg = item?.payload as DoseSegment | undefined;
@@ -1795,65 +2061,7 @@ export default function App() {
       </main>
 
       {/* Settings Modal */}
-      {isSettingsOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-cyan-50 text-cyan-600 rounded-lg">
-                  <Key size={20} />
-                </div>
-                <h3 className="font-black uppercase tracking-tighter">API Configuration</h3>
-              </div>
-              <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <Plus size={20} className="rotate-45" />
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Gemini API Key</label>
-                <input 
-                  type="password" 
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Enter your Gemini API key (AIzaSy...)"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all font-mono"
-                />
-                <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
-                  Provide your Gemini API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">Google AI Studio</a>, or configure <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">GEMINI_API_KEY</code> in Settings &gt; Secrets.
-                </p>
-              </div>
-
-              <div className="pt-3 border-t border-slate-100">
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Post-Surgery Recovery Date</label>
-                <input 
-                  type="date" 
-                  value={postSurgeryDate}
-                  onChange={(e) => handleSavePostSurgeryDate(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-rose-500/20 outline-none transition-all"
-                />
-                <p className="mt-1.5 text-[10px] text-slate-400 leading-relaxed">
-                  Preset starting date for focusing on post-surgery recovery. Used by the &quot;Post-Surgery&quot; toggle button.
-                </p>
-              </div>
-            </div>
-            <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-3">
-              <button 
-                onClick={() => setIsSettingsOpen(false)}
-                className="flex-1 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={handleSaveApiKey}
-                className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-md transition-all"
-              >
-                Save Configuration
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {settingsModal}
     </div>
   );
 }
